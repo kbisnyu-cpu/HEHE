@@ -82388,18 +82388,6 @@ local function k8xSetStatus(action)
 	end
 	ueS.SetStatus(k8xStatusText)
 end
-local function k8xEnemyHasKatana(target)
-	local ok, has = pcall(function()
-		local plr = target.FighterState ~= nil and target.FighterState.Player or nil
-		if plr == nil then
-			return false
-		end
-		local fighter = K.Controller("FighterController"):GetFighter(plr)
-		local held = fighter ~= nil and fighter.EquippedItem or nil
-		return held ~= nil and string.find(string.lower(tostring(held.Name)), "katana", 1, true) ~= nil
-	end)
-	return ok and has == true
-end
 local function k8xShouldVoid(arg, action, target, ownRoot)
 	-- no target
 	if target == nil then
@@ -82435,10 +82423,6 @@ local function k8xShouldVoid(arg, action, target, ownRoot)
 		end
 	elseif targetPos.Magnitude > K8X_FAR then
 		return true, "enemy beyond 14M (no OOB part)"
-	end
-	-- enemy holds a katana
-	if k8xEnemyHasKatana(target) then
-		return true, "enemy katana"
 	end
 	return false
 end
