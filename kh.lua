@@ -12486,10 +12486,10 @@ do
     -- the script unloads. Server-side logic, physics, animation and the ragebot do not depend on drawing and keep
     -- running (the effect of render-off on the ragebot is not measured yet - hence the "keep 3D" mode).
     -- K.PerfMode is set from Settings > General > Startup > Low-Load Mode and kept in the file KICIA_PERF_MODE:
-    --   "auto"   low-load only while the Roblox window is not the active window (default)
+    --   "auto"   low-load only while the Roblox window is not the active window
     --   "keep3d" same, but 3D rendering stays on (only quality and fps cap drop)
     --   "always" low-load even while the window is active (a single client that is only watched)
-    --   "off"    never touch rendering
+    --   "off"    never touch rendering (default)
     K.PerfModes = { auto = "Auto (window inactive)", keep3d = "Auto, keep 3D on", always = "Always", off = "Off" }
     K.PerfOrder = { "Auto (window inactive)", "Auto, keep 3D on", "Always", "Off" }
     function K.SetPerfMode(label)
@@ -12504,7 +12504,7 @@ do
     end
     pcall(function()
         if K.PerfMode == nil then
-            K.PerfMode = "auto"
+            K.PerfMode = "off" -- default: off (the user turns it on in Settings > General > Startup > Low-Load Mode)
             if isfile("KICIA_PERF_MODE") then
                 local t = string.gsub(readfile("KICIA_PERF_MODE"), "%s+", "")
                 if K.PerfModes[t] ~= nil then K.PerfMode = t end
@@ -30584,7 +30584,7 @@ end,
 arg:AddDropdown({
 Label = "Low-Load Mode",
 Options = K.PerfOrder or { "Auto (window inactive)", "Auto, keep 3D on", "Always", "Off" },
-Default = (K.PerfModes and K.PerfModes[K.PerfMode or "auto"]) or "Auto (window inactive)",
+Default = (K.PerfModes and K.PerfModes[K.PerfMode or "off"]) or "Off",
 Tooltip = "Cuts the load when several clients are open: 3D rendering off, lowest graphics, 60 fps cap. Auto = only while this Roblox window is not the active one. Keep 3D on = lower quality and fps cap only. Always = also while the window is active.",
 OnChanged = function(mode)
 if mode ~= nil and K.SetPerfMode then K.SetPerfMode(mode) end
