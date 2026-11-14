@@ -12477,6 +12477,86 @@ do
         hook(UIS.WindowFocused, function() K.Crumb("window focused") end)
         hook(UIS.WindowFocusReleased, function() K.Crumb("window lost focus") end)
     end)
+
+    -- Low-load mode. With several clients open (5 on one RTX 4060 in the 2026-11-14 18:2x logs) every one fell to
+    -- fps 4-17 with frames of 1-2.4 s and the one that was slowest (fps=4) crashed natively (access violation in
+    -- RobloxPlayerBeta, after an 11 s freeze). A client that nobody is looking at has no need to draw the 3D world,
+    -- so while low-load is on: 3D rendering is switched off, the graphics quality drops to 1 and the fps cap is 60
+    -- (rendering off would otherwise spin the loop at 300+ fps). Everything is put back when low-load ends, or when
+    -- the script unloads. Server-side logic, physics, animation and the ragebot do not depend on drawing and keep
+    -- running (the effect of render-off on the ragebot is not measured yet - hence the "keep 3D" mode).
+    -- K.PerfMode is set from Settings > General > Startup > Low-Load Mode and kept in the file KICIA_PERF_MODE:
+    --   "auto"   low-load only while the Roblox window is not the active window (default)
+    --   "keep3d" same, but 3D rendering stays on (only quality and fps cap drop)
+    --   "always" low-load even while the window is active (a single client that is only watched)
+    --   "off"    never touch rendering
+    K.PerfModes = { auto = "Auto (window inactive)", keep3d = "Auto, keep 3D on", always = "Always", off = "Off" }
+    K.PerfOrder = { "Auto (window inactive)", "Auto, keep 3D on", "Always", "Off" }
+    function K.SetPerfMode(label)
+        for key, text in pairs(K.PerfModes) do
+            if text == label then
+                K.PerfMode = key
+                local wrf = K.fn and K.fn("writefile")
+                if wrf then pcall(wrf, "KICIA_PERF_MODE", key) end
+                return
+            end
+        end
+    end
+    pcall(function()
+        if K.PerfMode == nil then
+            K.PerfMode = "auto"
+            if isfile("KICIA_PERF_MODE") then
+                local t = string.gsub(readfile("KICIA_PERF_MODE"), "%s+", "")
+                if K.PerfModes[t] ~= nil then K.PerfMode = t end
+            end
+        end
+        local RS = game:GetService("RunService")
+        local LOW_CAP = 60
+        local cur, saved = "normal", nil -- "normal" | "low" | "low-keep3d"
+        local function active()
+            local ok, a = pcall(isrbxactive)
+            if ok and type(a) == "boolean" then return a end
+            return true -- cannot tell: behave as if watched, never starve a client by mistake
+        end
+        local function want()
+            local m = K.PerfMode
+            if m == "off" then return "normal" end
+            if m == "always" or not active() then return "low" end
+            return "normal"
+        end
+        local function setState(target)
+            if target == "low" and K.PerfMode == "keep3d" then target = "low-keep3d" end
+            if target == cur then return end
+            if cur ~= "normal" then
+                local s = saved or {}
+                pcall(function() RS:Set3dRenderingEnabled(true) end)
+                if s.quality ~= nil then pcall(function() settings().Rendering.QualityLevel = s.quality end) end
+                -- getfpscap() gives 0 when it cannot be read; setfpscap(0) means the 2000 maximum, i.e. uncapped
+                pcall(setfpscap, (type(s.cap) == "number" and s.cap > 0) and s.cap or 0)
+                K.Log("perf", string.format("low-load off (cap back to %s)", tostring(s.cap)))
+                saved, cur = nil, "normal"
+            end
+            if target ~= "normal" then
+                saved = {}
+                pcall(function() saved.cap = getfpscap() end)
+                pcall(function() saved.quality = settings().Rendering.QualityLevel end)
+                local r1 = target == "low-keep3d" or pcall(function() RS:Set3dRenderingEnabled(false) end)
+                local r2 = pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+                local r3 = pcall(setfpscap, LOW_CAP)
+                cur = target
+                K.Log("perf", string.format("low-load on [%s] (3d off=%s, quality=%s, cap=%s; was cap=%s quality=%s)",
+                    tostring(K.PerfMode), tostring(r1), tostring(r2), tostring(r3), tostring(saved.cap), tostring(saved.quality)))
+            end
+        end
+        task.spawn(function()
+            while not K.destroyed do
+                setState(want())
+                task.wait(1)
+            end
+        end)
+        K.onUnload(function() setState("normal") end)
+    end)
+
     local seen, logged = {}, 0
     local function noteError(kind, message)
         message = tostring(message)
@@ -30499,6 +30579,15 @@ Default = K.UIMode(),
 Tooltip = "Starlight (default) is built into the script; if it fails, the classic menu is shown for that session. Classic is the script's own menu.",
 OnChanged = function(mode)
 if mode ~= nil and mode ~= K.UIMode() then K.SwitchUI(mode) end
+end,
+})
+arg:AddDropdown({
+Label = "Low-Load Mode",
+Options = K.PerfOrder or { "Auto (window inactive)", "Auto, keep 3D on", "Always", "Off" },
+Default = (K.PerfModes and K.PerfModes[K.PerfMode or "auto"]) or "Auto (window inactive)",
+Tooltip = "Cuts the load when several clients are open: 3D rendering off, lowest graphics, 60 fps cap. Auto = only while this Roblox window is not the active one. Keep 3D on = lower quality and fps cap only. Always = also while the window is active.",
+OnChanged = function(mode)
+if mode ~= nil and K.SetPerfMode then K.SetPerfMode(mode) end
 end,
 })
 arg:AddToggle({ Label = "Re-run After Teleport", Config = arg3 })
