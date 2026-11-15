@@ -32530,7 +32530,7 @@ return bc.c
 end
 end
 do -- bd
-local function fn35() tbl17 .o();local I= tbl17 .i().atomic;return{AutoPickupDrops={Enabled=false,Types=I({})},AutoRespawn={Enabled=false},AntiKatana={Enabled=true},SubspaceTripmines={AutoTrigger=false,TeamTrigger=false},AutoQueue={Enabled=false,Queue="1v1"},AutoVote={Enabled=false,Maps=I({})},AutoBan={Enabled=false,FirstWeapons=I({}),SecondWeapons=I({})},AutoLoadout={Enabled=false,PerMap=false,MultipleLoadouts=false,Loadouts=I({})},HackerDetector={Enabled=false,Notify=false,Color=Color3.fromRGB(250,170,70)},ModDetector={Enabled=false,Moderators=I({}),ModFriends=I({}),Color=Color3.fromRGB(250,170,70)}};end
+local function fn35() tbl17 .o();local I= tbl17 .i().atomic;return{AutoPickupDrops={Enabled=false,Types=I({})},AutoRespawn={Enabled=false},AntiKatana={Enabled=true},RivalsHelper={Leaderboard=false,Hud=false,HidePlayers="",PlayerAlerts=false,WatchList="",WebhookUrl="",StreakAlerts=false,StreakThreshold=1000,LeaderboardX=-1,LeaderboardY=-1,HudX=-1,HudY=-1},SubspaceTripmines={AutoTrigger=false,TeamTrigger=false},AutoQueue={Enabled=false,Queue="1v1"},AutoVote={Enabled=false,Maps=I({})},AutoBan={Enabled=false,FirstWeapons=I({}),SecondWeapons=I({})},AutoLoadout={Enabled=false,PerMap=false,MultipleLoadouts=false,Loadouts=I({})},HackerDetector={Enabled=false,Notify=false,Color=Color3.fromRGB(250,170,70)},ModDetector={Enabled=false,Moderators=I({}),ModFriends=I({}),Color=Color3.fromRGB(250,170,70)}};end
 
 tbl17.bd = function()
 local bd = tbl17.cache.bd
@@ -72139,8 +72139,459 @@ end
 return hz.c
 end
 end
+--==========================================================================
+--  Rivals Helper: ELO leaderboard, FPS / ping / server HUD, watchlist join alerts (+ optional Discord webhook)
+--  and streak-hunter alerts. Ported from v4pl/RivalsHelper (obfuscated.lua, restored with a decompiler).
+--  Everything is driven by Config.RivalsHelper: a 0.25 s controller starts and stops the pieces, and
+--  K.onUnload removes all of them. The menu page is tbl17.hRH (Automation > Rivals Helper).
+--==========================================================================
+do -- hRHrun
+local function fn35()
+    tbl17.aE()
+    local config = tbl17.bG()
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local HttpService = game:GetService("HttpService")
+    local localPlayer = Players.LocalPlayer
+    local alive = true
+
+    local function get(key)
+        local ok, v = pcall(function() return config.Data.RivalsHelper[key] end)
+        if ok then return v end
+        return nil
+    end
+
+    local function parseList(text)
+        local set = {}
+        if type(text) == "string" then
+            for raw in string.gmatch(text, "[^,;\n]+") do
+                local item = string.lower((string.gsub(raw, "^%s+", ""):gsub("%s+$", "")))
+                if item ~= "" then set[item] = true end
+            end
+        end
+        return set
+    end
+
+    local function new(class, props)
+        local inst = Instance.new(class)
+        for k, v in pairs(props) do inst[k] = v end
+        return inst
+    end
+
+    local function headshot(userId)
+        return "https://www.roblox.com/headshot-thumbnail/image?userId=" .. tostring(userId) .. "&width=100&height=100&format=png"
+    end
+
+    --------------------------------------------------------------- popups
+    local popupGui
+    local slots = {}
+    local function popup(text, color, soundId, duration, imageUrl)
+        if not alive then return end
+        if popupGui == nil or popupGui.Parent == nil then
+            popupGui = new("ScreenGui", {Name = HttpService:GenerateGUID(false), ResetOnSpawn = false, DisplayOrder = 30, Parent = K.hudParent()})
+        end
+        local slot = 1
+        while slots[slot] do slot = slot + 1 end
+        slots[slot] = true
+        local y = 12 + (slot - 1) * 78
+        local frame = new("Frame", {
+            Size = UDim2.new(0, 360, 0, 70), Position = UDim2.new(0.5, -180, 0, y - 90),
+            BackgroundColor3 = color, BackgroundTransparency = 0.15, BorderSizePixel = 0, Parent = popupGui,
+        })
+        new("UICorner", {CornerRadius = UDim.new(0, 10), Parent = frame})
+        if imageUrl then
+            new("ImageLabel", {Size = UDim2.new(0, 50, 0, 50), Position = UDim2.new(0, 10, 0.5, -25), BackgroundTransparency = 1, Image = imageUrl, Parent = frame})
+        end
+        new("TextLabel", {
+            Size = UDim2.new(1, -70, 1, -10), Position = UDim2.new(0, 65, 0, 5), BackgroundTransparency = 1,
+            TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextScaled = true, Text = text,
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = frame,
+        })
+        local sound = new("Sound", {SoundId = soundId, Volume = 2, Parent = frame})
+        pcall(function() sound:Play() end)
+        pcall(function() frame:TweenPosition(UDim2.new(0.5, -180, 0, y), Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.3, true) end)
+        task.delay(duration or 3, function()
+            pcall(function() frame:TweenPosition(UDim2.new(0.5, -180, 0, y - 90), Enum.EasingDirection.In, Enum.EasingStyle.Back, 0.3, true) end)
+            task.wait(0.4)
+            frame:Destroy()
+            slots[slot] = nil
+        end)
+    end
+
+    --------------------------------------------------------------- webhook
+    local function sendWebhook(player, priority)
+        local url = get("WebhookUrl")
+        if type(url) ~= "string" or url == "" then return end
+        task.spawn(function()
+            pcall(function()
+                local body = HttpService:JSONEncode({
+                    username = "Rivals Assistant",
+                    embeds = {{
+                        title = priority and "Watchlist player found" or "Player found",
+                        description = player.Name .. " has joined your server!",
+                        color = priority and 16711680 or 3447003,
+                        thumbnail = {url = headshot(player.UserId)},
+                        footer = {text = "Rivals Assistant"},
+                        timestamp = DateTime.now():ToIsoDate(),
+                    }},
+                })
+                local req = (syn and syn.request) or http_request or request
+                if req then
+                    req({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
+                else
+                    HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
+                end
+            end)
+        end)
+    end
+
+    --------------------------------------------------------------- stats
+    local function pick(parent, names)
+        for _, n in ipairs(names) do
+            local c = parent:FindFirstChild(n)
+            if c then return c end
+        end
+        return nil
+    end
+    local function stat(player, childNames, attrNames)
+        if player:FindFirstChild("leaderstats") then
+            local s = pick(player.leaderstats, childNames)
+            if s and s.Value ~= nil then return tonumber(s.Value) or 0 end
+        end
+        for _, a in ipairs(attrNames) do
+            local v = player:GetAttribute(a)
+            if v ~= nil then return tonumber(v) or 0 end
+        end
+        return 0
+    end
+    local function getElo(p) return stat(p, {"ELO", "Elo", "DisplayELO"}, {"DisplayELO", "ELO", "Elo", "elo", "displayELO"}) end
+    local function getLevel(p) return stat(p, {"Level", "level"}, {"Level", "level"}) end
+    local function getStreak(p) return stat(p, {"Win Streak", "WinStreak", "StatisticDuelsWinStreak"}, {"StatisticDuelsWinStreak", "Win Streak", "WinStreak", "StatisticDuelsWins"}) end
+
+    local rankColors = {
+        Bronze = Color3.fromRGB(205, 127, 50), Silver = Color3.fromRGB(192, 192, 192), Gold = Color3.fromRGB(255, 215, 0),
+        Platinum = Color3.fromRGB(175, 238, 238), Diamond = Color3.fromRGB(0, 191, 255), Onyx = Color3.fromRGB(85, 0, 128),
+        Nemesis = Color3.fromRGB(255, 69, 0), Archnemesis = Color3.fromRGB(255, 0, 0),
+    }
+    local function eloToRank(elo)
+        if not elo then return "Bronze" end
+        elo = tonumber(elo) or 0
+        if elo >= 6000 then return "Archnemesis" end
+        if elo >= 3600 then return "Nemesis" end
+        if elo >= 3000 then return "Onyx" end
+        if elo >= 2400 then return "Diamond" end
+        if elo >= 1800 then return "Platinum" end
+        if elo >= 1200 then return "Gold" end
+        if elo >= 600 then return "Silver" end
+        return "Bronze"
+    end
+    local function rankColor(rank)
+        local c = rankColors[rank] or Color3.new(1, 1, 1)
+        return string.format("rgb(%d,%d,%d)", math.floor(c.R * 255), math.floor(c.G * 255), math.floor(c.B * 255))
+    end
+    local function truncate(text, maxLen)
+        maxLen = maxLen or 12
+        if #text <= maxLen then return text end
+        return string.sub(text, 1, maxLen - 1) .. "..."
+    end
+
+    --------------------------------------------------------------- draggable panels
+    -- The panels are built once and then only shown / hidden. They can be dragged while the KH menu is open
+    -- (K.MakeHudDraggable); the drop position is saved in Config.RivalsHelper as a percent of the screen.
+    local function savedPos(keyX, keyY)
+        local px, py = tonumber(get(keyX)), tonumber(get(keyY))
+        if px and py and px >= 0 and py >= 0 then return UDim2.fromScale(px / 100, py / 100) end
+        return nil
+    end
+    local function makeDraggable(frame, keyX, keyY)
+        local pos = savedPos(keyX, keyY)
+        if pos then frame.Position = pos end
+        pcall(K.MakeHudDraggable, frame, function(x, y)
+            pcall(function()
+                config:Set({"RivalsHelper", keyX}, x)
+                config:Set({"RivalsHelper", keyY}, y)
+            end)
+        end)
+    end
+
+    --------------------------------------------------------------- leaderboard
+    local lb, lbToken = nil, nil
+    local LB_DEFAULT = UDim2.new(1, -380, 0, 60)
+    local function buildLeaderboard()
+        local gui = new("ScreenGui", {
+            Name = HttpService:GenerateGUID(false), ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 20,
+            ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = K.hudParent(),
+        })
+        local frame = new("Frame", {
+            Size = UDim2.new(0, 360, 0, 300), Position = LB_DEFAULT, BackgroundColor3 = Color3.fromRGB(25, 25, 25),
+            BackgroundTransparency = 0.15, BorderSizePixel = 0, Parent = gui,
+        })
+        new("UICorner", {CornerRadius = UDim.new(0, 10), Parent = frame})
+        new("UIStroke", {Thickness = 2, Color = Color3.fromRGB(25, 25, 40), Parent = frame})
+        local title = new("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = Color3.fromRGB(35, 35, 35), BorderSizePixel = 0, Parent = frame})
+        new("UICorner", {CornerRadius = UDim.new(0, 10), Parent = title})
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 16,
+            TextColor3 = Color3.new(1, 1, 1), Text = "Rivals Leaderboard", Parent = title,
+        })
+        local list = new("ScrollingFrame", {
+            Size = UDim2.new(1, -10, 1, -46), Position = UDim2.new(0, 5, 0, 40), BackgroundTransparency = 1,
+            ScrollBarThickness = 6, CanvasSize = UDim2.new(0, 0, 0, 0), Parent = frame,
+        })
+        new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list})
+        makeDraggable(frame, "LeaderboardX", "LeaderboardY")
+        lb = {gui = gui, frame = frame, list = list, pool = {}}
+    end
+    local function refreshLeaderboard()
+        local hide = parseList(get("HidePlayers"))
+        local rows = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            local elo, level, streak = getElo(plr), getLevel(plr), getStreak(plr)
+            if not hide[string.lower(plr.Name)] and (level ~= 0 or streak ~= 0 or elo ~= 0 or plr.Name == localPlayer.Name) then
+                table.insert(rows, {name = plr.Name, streak = streak, level = level, elo = elo, rank = eloToRank(elo)})
+            end
+        end
+        table.sort(rows, function(a, b)
+            if a.elo ~= b.elo then return a.elo > b.elo end
+            if a.level ~= b.level then return a.level > b.level end
+            return a.streak > b.streak
+        end)
+        for idx, row in ipairs(rows) do
+            local label = lb.pool[idx]
+            if not label then
+                label = new("TextLabel", {
+                    Size = UDim2.new(1, -8, 0, 22), Position = UDim2.new(0, 4, 0, (idx - 1) * 26 + 2), BackgroundTransparency = 1,
+                    Font = Enum.Font.GothamSemibold, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+                    TextColor3 = Color3.fromRGB(230, 230, 230), RichText = true, Parent = lb.list,
+                })
+                lb.pool[idx] = label
+            end
+            local pos = "rgb(230,230,230)"
+            if idx == 1 then pos = "rgb(255,215,0)" elseif idx == 2 then pos = "rgb(192,192,192)" elseif idx == 3 then pos = "rgb(205,127,50)" end
+            label.Text = string.format("<font color='%s'>#%d</font> [Lvl %s] %s | <font color='%s'>WS: %s</font> | <font color='%s'>ELO: %d (%s)</font>",
+                pos, idx, tostring(row.level), truncate(row.name, 12),
+                row.streak > 0 and "rgb(100,255,100)" or "rgb(255,100,100)", tostring(row.streak),
+                rankColor(row.rank), row.elo, row.rank)
+        end
+        for i = #rows + 1, #lb.pool do
+            if lb.pool[i] then
+                lb.pool[i]:Destroy()
+                lb.pool[i] = nil
+            end
+        end
+        lb.list.CanvasSize = UDim2.new(0, 0, 0, math.max(0, #rows * 26))
+    end
+    local function startLeaderboard()
+        if lbToken then return end
+        if not lb then buildLeaderboard() end
+        lb.gui.Enabled = true
+        local token = {}
+        lbToken = token
+        task.spawn(function()
+            while alive and lbToken == token do
+                local ok, err = pcall(refreshLeaderboard)
+                if not ok then warn("[RivalsHelper] leaderboard refresh error: " .. tostring(err)) end
+                for _ = 1, 16 do
+                    if not alive or lbToken ~= token then break end
+                    task.wait(0.25)
+                end
+            end
+        end)
+    end
+    local function stopLeaderboard()
+        lbToken = nil
+        if lb then lb.gui.Enabled = false end
+    end
+
+    --------------------------------------------------------------- HUD
+    local hud, hudConn = nil, nil
+    local HUD_DEFAULT = UDim2.new(1, -280, 0, 320)
+    -- Server line: only values the client can really read. Checked against the client log on 2026-11-15: workspace.DistributedGameTime
+    -- is NOT the server's uptime (it started ~9 s after the client had connected), and Stats.Network.ServerStatsItem.ElapsedTime
+    -- matches the moment "Connection accepted" was logged, so the time shown is how long this client has been connected.
+    -- The client is never told where the server is, so no region is shown.
+    local function serverInfo()
+        local t = 0
+        local ok, v = pcall(function() return game:GetService("Stats").Network.ServerStatsItem.ElapsedTime:GetValue() end)
+        t = math.floor((ok and v) or workspace.DistributedGameTime)
+        return string.format("Server: %d/%d players | in %d:%02d", #Players:GetPlayers(), Players.MaxPlayers, math.floor(t / 60), t % 60)
+    end
+    local function buildHud()
+        local gui = new("ScreenGui", {Name = HttpService:GenerateGUID(false), ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 20, Parent = K.hudParent()})
+        local frame = new("Frame", {
+            Size = UDim2.new(0, 260, 0, 112), Position = HUD_DEFAULT, BackgroundColor3 = Color3.fromRGB(25, 25, 25),
+            BackgroundTransparency = 0.15, BorderSizePixel = 0, Parent = gui,
+        })
+        new("UICorner", {CornerRadius = UDim.new(0, 10), Parent = frame})
+        new("UIStroke", {Thickness = 2, Color = Color3.fromRGB(25, 25, 40), Parent = frame})
+        local bar = new("Frame", {Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = Color3.fromRGB(35, 35, 35), BorderSizePixel = 0, Parent = frame})
+        new("UICorner", {CornerRadius = UDim.new(0, 10), Parent = bar})
+        new("TextLabel", {
+            Size = UDim2.new(1, -8, 1, 0), Position = UDim2.new(0, 8, 0, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+            TextSize = 14, TextColor3 = Color3.fromRGB(255, 255, 255), Text = "Rivals HUD", TextXAlignment = Enum.TextXAlignment.Left, Parent = bar,
+        })
+        local function line(y)
+            return new("TextLabel", {
+                Size = UDim2.new(1, -12, 0, 20), Position = UDim2.new(0, 6, 0, y), BackgroundTransparency = 1,
+                TextColor3 = Color3.fromRGB(255, 255, 255), Font = Enum.Font.GothamBold, TextSize = 14,
+                TextXAlignment = Enum.TextXAlignment.Left, Parent = frame,
+            })
+        end
+        makeDraggable(frame, "HudX", "HudY")
+        hud = {gui = gui, frame = frame, fps = line(34), ping = line(58), server = line(82)}
+    end
+    local function startHud()
+        if hudConn then return end
+        if not hud then buildHud() end
+        hud.gui.Enabled = true
+        hud.server.Text = serverInfo()
+        local frames, pingFrames, last = 0, 0, os.clock()
+        hudConn = RunService.RenderStepped:Connect(function()
+            frames = frames + 1
+            pingFrames = pingFrames + 1
+            local now = os.clock()
+            if now - last >= 1 then
+                hud.fps.Text = "FPS: " .. frames
+                frames = 0
+                last = now
+            end
+            if frames % 6 == 1 or hud.ping.Text == "" then
+                -- both numbers are what Roblox itself reports: Ping = the performance-stats value (GetNetworkPing, in
+                -- seconds, x1000), Data = Stats.Network "Data Ping" from the developer console. No guessed conversion.
+                local ok, ping = pcall(function() return math.floor(localPlayer:GetNetworkPing() * 1000 + 0.5) end)
+                local okD, data = pcall(function() return math.floor(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5) end)
+                hud.ping.Text = string.format("Ping: %s | Data: %s", (ok and ping) and (ping .. "ms") or "-", (okD and data) and (data .. "ms") or "-")
+            end
+            if pingFrames >= 60 then
+                pingFrames = 0
+                hud.server.Text = serverInfo()
+            end
+        end)
+    end
+    local function stopHud()
+        if hudConn then hudConn:Disconnect() hudConn = nil end
+        if hud then hud.gui.Enabled = false end
+    end
+
+    -- "Reset Panel Positions" button: forget the saved spots and put both panels back
+    K.RivalsHelperResetPositions = function()
+        for _, key in ipairs({"LeaderboardX", "LeaderboardY", "HudX", "HudY"}) do
+            pcall(function() config:Set({"RivalsHelper", key}, -1) end)
+        end
+        if lb then lb.frame.Position = LB_DEFAULT end
+        if hud then hud.frame.Position = HUD_DEFAULT end
+    end
+
+    --------------------------------------------------------------- watchlist + streak alerts
+    local alerted, streakSeen = {}, {}
+    local watchConn, streakConn, removeConn
+
+    local function checkWatch(plr)
+        if not alive or plr == localPlayer or alerted[plr.UserId] then return end
+        if parseList(get("WatchList"))[string.lower(plr.Name)] then
+            alerted[plr.UserId] = true
+            popup("ALERT: " .. plr.Name .. " joined!", Color3.fromRGB(120, 0, 0), "rbxassetid://12222005", 4, headshot(plr.UserId))
+            sendWebhook(plr, true)
+        end
+    end
+    local function checkStreak(plr)
+        if not alive or streakSeen[plr.UserId] or not plr.Parent then return end
+        local streak = getStreak(plr)
+        local limit = tonumber(get("StreakThreshold")) or 1000
+        if streak >= limit then
+            streakSeen[plr.UserId] = true
+            popup("STREAKHUNTER: " .. tostring(plr.Name) .. " (" .. tostring(streak) .. " WS)", Color3.fromRGB(255, 128, 0), "rbxassetid://138201977", 5)
+        end
+    end
+    local function startWatch()
+        if watchConn then return end
+        watchConn = Players.PlayerAdded:Connect(function(plr) task.defer(pcall, checkWatch, plr) end)
+        for _, plr in ipairs(Players:GetPlayers()) do pcall(checkWatch, plr) end
+    end
+    local function stopWatch()
+        if watchConn then watchConn:Disconnect() watchConn = nil end
+    end
+    local function startStreak()
+        if streakConn then return end
+        streakConn = Players.PlayerAdded:Connect(function(plr) task.defer(pcall, checkStreak, plr) end)
+        for _, plr in ipairs(Players:GetPlayers()) do pcall(checkStreak, plr) end
+    end
+    local function stopStreak()
+        if streakConn then streakConn:Disconnect() streakConn = nil end
+    end
+    removeConn = Players.PlayerRemoving:Connect(function(plr)
+        alerted[plr.UserId] = nil
+        streakSeen[plr.UserId] = nil
+    end)
+
+    --------------------------------------------------------------- controller
+    K.onUnload(function()
+        alive = false
+        stopLeaderboard() stopHud() stopWatch() stopStreak()
+        if lb then lb.gui:Destroy() lb = nil end
+        if hud then hud.gui:Destroy() hud = nil end
+        K.RivalsHelperResetPositions = nil
+        if removeConn then removeConn:Disconnect() end
+        if popupGui then popupGui:Destroy() end
+    end)
+    task.spawn(function()
+        while alive and not K.destroyed do
+            local function apply(on, start, stop)
+                if on then pcall(start) else pcall(stop) end
+            end
+            apply(get("Leaderboard") == true, startLeaderboard, stopLeaderboard)
+            apply(get("Hud") == true, startHud, stopHud)
+            apply(get("PlayerAlerts") == true, startWatch, stopWatch)
+            apply(get("StreakAlerts") == true, startStreak, stopStreak)
+            task.wait(0.25)
+        end
+    end)
+    return true
+end
+
+tbl17.hRHrun = function()
+local c = tbl17.cache.hRHrun
+
+if not c then
+c = { c = fn35() }
+tbl17.cache.hRHrun = c
+end
+
+return c.c
+end
+end
+do -- hRH
+local function fn35()
+    tbl17.aE()
+    tbl17.hRHrun()
+    return function(l)
+        local I = l:AddSection({Title = "Overlays", Side = "left"})
+        I:AddToggle({Label = "Leaderboard (ELO / Level / Win Streak)", Config = {"RivalsHelper", "Leaderboard"}})
+        I:AddToggle({Label = "Info HUD (FPS / Ping / Server)", Config = {"RivalsHelper", "Hud"}})
+        I:AddTextBox({Label = "Hide From Leaderboard", Placeholder = "name1, name2", Config = {"RivalsHelper", "HidePlayers"}})
+        I:AddButton({Label = "Reset Panel Positions", OnClick = function() if K.RivalsHelperResetPositions then K.RivalsHelperResetPositions() end end})
+        local A = l:AddSection({Title = "Alerts", Side = "right"})
+        A:AddToggle({Label = "Watchlist Join Alerts", Config = {"RivalsHelper", "PlayerAlerts"}})
+        A:AddTextBox({Label = "Watchlist", Placeholder = "name1, name2", Config = {"RivalsHelper", "WatchList"}})
+        A:AddTextBox({Label = "Discord Webhook URL (optional)", Placeholder = "https://discord.com/api/webhooks/...", Config = {"RivalsHelper", "WebhookUrl"}})
+        A:AddToggle({Label = "Streak Hunter Alerts", Config = {"RivalsHelper", "StreakAlerts"}})
+        A:AddSlider({Label = "Streak Threshold", Min = 5, Max = 1000, Step = 5, Config = {"RivalsHelper", "StreakThreshold"}})
+    end
+end
+
+tbl17.hRH = function()
+local c = tbl17.cache.hRH
+
+if not c then
+c = { c = fn35() }
+tbl17.cache.hRH = c
+end
+
+return c.c
+end
+end
 do -- h_
-local function fn35() tbl17 .aE(); tbl17 .hN();local I,W,N,P,a,e,c,E,p,T,t= tbl17 .hO(), tbl17 .hP(), tbl17 .hR(), tbl17 .hS(), tbl17 .hU(), tbl17 .hV(), tbl17 .hW(), tbl17 .hX(), tbl17 .hY(), tbl17 .hZ(),{Automation="rbxassetid://70979486241131",Detection="rbxassetid://132868138496209",Match="rbxassetid://99293705721130"};return function(l,x)l=x:AddTab({Label="Automation",Icon=t.Automation,Description="Match flow, loadouts, in-match automation, and detection."});x=l:AddTab({Label="Match Flow",Icon=t.Match,Description="Automate queueing, voting, bans, and respawns."}):Grid({Columns=2});a(x);c(x);W(x);e(x);N((l:AddTab({Label="Auto Loadout",Icon=t.Automation,Description="Configure map-specific and fallback loadouts."}):Grid({Columns=2})));x=l:AddTab({Label="In-Match Automation",Icon=t.Match,Description="Automate pickups, counters, and tripmines."}):Grid({Columns=2});P(x);I(x);T(x);x=l:AddTab({Label="Detection",Icon=t.Detection,Description="Detect hackers and moderators."}):Grid({Columns=2});E(x);p(x);end;end
+local function fn35() tbl17 .aE(); tbl17 .hN();local RH= tbl17 .hRH();local I,W,N,P,a,e,c,E,p,T,t= tbl17 .hO(), tbl17 .hP(), tbl17 .hR(), tbl17 .hS(), tbl17 .hU(), tbl17 .hV(), tbl17 .hW(), tbl17 .hX(), tbl17 .hY(), tbl17 .hZ(),{Automation="rbxassetid://70979486241131",Detection="rbxassetid://132868138496209",Match="rbxassetid://99293705721130"};return function(l,x)l=x:AddTab({Label="Automation",Icon=t.Automation,Description="Match flow, loadouts, in-match automation, and detection."});x=l:AddTab({Label="Match Flow",Icon=t.Match,Description="Automate queueing, voting, bans, and respawns."}):Grid({Columns=2});a(x);c(x);W(x);e(x);N((l:AddTab({Label="Auto Loadout",Icon=t.Automation,Description="Configure map-specific and fallback loadouts."}):Grid({Columns=2})));x=l:AddTab({Label="In-Match Automation",Icon=t.Match,Description="Automate pickups, counters, and tripmines."}):Grid({Columns=2});P(x);I(x);T(x);x=l:AddTab({Label="Detection",Icon=t.Detection,Description="Detect hackers and moderators."}):Grid({Columns=2});E(x);p(x);x=l:AddTab({Label="Rivals Helper",Icon=t.Detection,Description="Leaderboard, info HUD, watchlist and streak alerts."}):Grid({Columns=2});RH(x);end;end
 
 tbl17.h_ = function()
 local h = tbl17.cache.h_
