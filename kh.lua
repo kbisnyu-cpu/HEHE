@@ -74350,7 +74350,7 @@ if mode=="Setsuna" and K.SetsunaUI~=nil then MenuClass=K.SetsunaUI.Menu end
 if mode=="Setsuna Drop" and K.SetsunaUI~=nil then MenuClass=K.SetsunaUI.Drop end
 if mode=="Matcha" and K.SetsunaUI~=nil and K.SetsunaUI.Matcha~=nil then MenuClass=K.SetsunaUI.Matcha end
 if mode=="KH V2" and K.SetsunaUI~=nil and K.SetsunaUI.V2~=nil then MenuClass=K.SetsunaUI.V2 end
-local t=MenuClass.new({Icon=K.LithiumLogo,Title=string.format("LxYHook | Rivals | %s",tostring("Premium Build")),Directory=K.AccountDir,Config=l.ReactiveStoreAdapter,ColorAnimation=l.ColorAnimation,Persistence=I,State=l.GeneralState,StateData=l.GeneralStateData,OnUnload=function()e:Destroy();end})
+local t=MenuClass.new({Icon=(K.LoadLogo and K.LoadLogo() or K.LithiumLogo),Title=string.format("LxYHook | Rivals | %s",tostring("Premium Build")),Directory=K.AccountDir,Config=l.ReactiveStoreAdapter,ColorAnimation=l.ColorAnimation,Persistence=I,State=l.GeneralState,StateData=l.GeneralStateData,OnUnload=function()e:Destroy();end})
 current=t
 e:Add(t)
 local ids=l.PlayerIdentities
@@ -86303,13 +86303,39 @@ do
         end
         return buffer.readstring(out, 0, n)
     end
+    local logoData = decode(LITHIUM_LOGO_B64)
+    -- Called at startup and again by every place that shows the logo, so a failed first try is retried on use.
+    function K.LoadLogo()
+    if K.LithiumLogo ~= nil then return K.LithiumLogo end
     local wrf, gca = K.fn("writefile"), K.fn("getcustomasset") or K.fn("getsynasset")
     if wrf and gca then
-        local path = "kiciarebuild/lithium_logo.png"
-        local ok = pcall(wrf, path, decode(LITHIUM_LOGO_B64))
-        local ok2, id = pcall(gca, path)
-        if ok and ok2 and type(id) == "string" and id ~= "" then K.LithiumLogo = id end
+        -- The old version rewrote one shared file on every load. With several clients open at once another one can
+        -- hold that file, the write fails, and the logo came out blank. Now: keep an intact existing file as it is,
+        -- only write when it is missing or the wrong size, and fall back to a per-session file name if writing fails.
+        local isf, rdf = K.fn("isfile"), K.fn("readfile")
+        local data = logoData
+        local function intact(path)
+            if not (isf and rdf) then return false end
+            local ok, good = pcall(function() return isf(path) and #rdf(path) == #data end)
+            return ok and good == true
+        end
+        local function tryPath(path)
+            if not intact(path) then
+                if not pcall(wrf, path, data) then return nil end
+            end
+            for attempt = 1, 3 do
+                local ok2, id = pcall(gca, path)
+                if ok2 and type(id) == "string" and id ~= "" then return id end
+                pcall(task.wait, 0.05 * attempt)
+            end
+            return nil
+        end
+        K.LithiumLogo = tryPath("kiciarebuild/lithium_logo.png")
+            or tryPath(string.format("kiciarebuild/lithium_logo_%d.png", math.random(100000, 999999)))
     end
+    return K.LithiumLogo
+    end
+    K.LoadLogo()
 end
 
 --==========================================================================
@@ -88324,7 +88350,7 @@ end
         -- the menu key is handled in Menu.new (Starlight's own key is parked on a key nobody has)
         pcall(function() L.WindowKeybind = "F15" end)
         pcall(function()
-            local logo = K.LithiumLogo
+            local logo = (K.LoadLogo and K.LoadLogo() or K.LithiumLogo)
             if logo ~= nil then
                 L.Instance.MainWindow.Sidebar.Icon.Image = logo
                 L.Instance.MobileToggle.Image = logo
@@ -90184,7 +90210,7 @@ end
         self:_paint(rst, "Color", "acc")
         self._ring = ring
 
-        local logo = mk("ImageLabel", { AnchorPoint = Vector2.new(.5, .5), Size = UDim2.fromOffset(96, 96), BackgroundTransparency = 1, Image = tostring(K.LithiumLogo or ""), ZIndex = 3 }, stage)
+        local logo = mk("ImageLabel", { AnchorPoint = Vector2.new(.5, .5), Size = UDim2.fromOffset(96, 96), BackgroundTransparency = 1, Image = tostring((K.LoadLogo and K.LoadLogo() or K.LithiumLogo) or ""), ZIndex = 3 }, stage)
         self._logo = logo
 
         self._bubbles = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 4 }, stage)
@@ -90917,7 +90943,7 @@ end
         local side = mk("Frame", { Size = UDim2.new(0, LITE_SIDE, 1, 0), BorderSizePixel = 0 }, win)
         self:_paint(side, "BackgroundColor3", "side")
         self._side = side
-        local logo = mk("ImageLabel", { Position = UDim2.fromOffset(12, 5), Size = UDim2.fromOffset(32, 32), BackgroundTransparency = 1, Image = tostring(K.LithiumLogo or "") }, side)
+        local logo = mk("ImageLabel", { Position = UDim2.fromOffset(12, 5), Size = UDim2.fromOffset(32, 32), BackgroundTransparency = 1, Image = tostring((K.LoadLogo and K.LoadLogo() or K.LithiumLogo) or "") }, side)
         local title = text(self, side, tostring(self.Title or "LxYHook"), 11, "text", false)
         title.Position = UDim2.fromOffset(52, 0)
         title.Size = UDim2.new(1, -56, 0, LITE_HEAD)
