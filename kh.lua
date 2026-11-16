@@ -61946,7 +61946,8 @@ return false
 end
 local n = (arg._speedTimerByPlayer[arg2] or v86[186]) + arg3
 arg._speedTimerByPlayer[arg2] = n
-return n > 0.25
+-- was 0.25 s; 0.1 s is ~6 frames of sustained >200 studs/s (a one-frame teleport spike still does not count)
+return n > 0.1
 end
 
 -- Rage cheaters desync their server position to absurd coordinates (~2^30 studs) so shots
@@ -61967,7 +61968,8 @@ return false
 end
 local n = (arg._farTimerByPlayer[arg2] or 0) + arg3
 arg._farTimerByPlayer[arg2] = n
-return n > 0.25
+-- was 0.25 s; nothing legit sits past 4194304 studs, so 0.05 s (~3 frames) only filters a single glitch frame
+return n > 0.05
 end
 
 index2.Destroy = function(arg)
@@ -82070,10 +82072,25 @@ end
 end
 end
 
+-- Underground (Movement.Underground, toggle + keybind) and the ragebot are mutually exclusive: while
+-- underground is on, every ragebot style is held off (KH/UE/FWUE via Update, Careful via its Heartbeat).
+function K.UndergroundActive()
+local ok, result = pcall(function()
+local movement = tbl17.bG().Data.Movement
+local settings = movement ~= nil and movement.Underground or nil
+if settings == nil or not settings.Enabled then
+return false
+end
+local keybind = settings.Keybind
+return keybind == nil or keybind.State == true
+end)
+return ok and result == true
+end
+
 local active = false
 local syncAt = 0
 local carefulHeartbeat = RunService.Heartbeat:Connect(function(dt)
-local want = tbl17.ragebotKeyOn == true and K.RagebotStyle(config.Data.Ragebot.KnifeMode) == "Careful"
+local want = tbl17.ragebotKeyOn == true and K.RagebotStyle(config.Data.Ragebot.KnifeMode) == "Careful" and not K.UndergroundActive()
 if want ~= active then
 active = want
 rage.Enabled = want
@@ -82490,6 +82507,11 @@ roundDelayLog(string.format("ARMED %.2f s", delaySeconds))
 end
 tbl17.ragebotRoundWas = roundNow
 tbl17.ragebotUpdateSeen = true
+end
+-- Underground on: the ragebot stays off in every style (the underground write owns the server CFrame).
+if K.UndergroundActive() then
+arg:_Reset()
+return
 end
 -- Careful style is the LY hub's ragebot (module LYC) on its own Heartbeat: KH's planner lets go once and
 -- then stays out of it. LY never touches the assembly history flags, so they go back to the off values.
@@ -83007,6 +83029,55 @@ local function k8xShouldVoid(arg, action, target, ownRoot)
 	return false
 end
 
+-- k8x picks its OWN weapon: KH's getAction (slot priority, Weapons.Enabled switches, OnEmpty) is not consulted.
+-- Order: a loaded gun that is already in hand, else the lowest-slot loaded gun (Swap), else a gun that only needs
+-- a reload (held one first, then lowest slot). With no usable gun it returns nil plus the item in hand, so the
+-- caller can void-spam when that is a melee / utility item instead of a gun.
+local function k8xPickAction(arg)
+	local items = nil
+	pcall(function()
+		items = arg._innerContext.ItemBehaviors:GetItems()
+	end)
+	if items == nil then
+		return nil, nil
+	end
+	local held = nil
+	local readyGun, readyHeld, readyIndex = nil, false, math.huge
+	local reloadGun, reloadHeld, reloadIndex = nil, false, math.huge
+	for _, it in items do
+		local okE, isHeld = pcall(it.IsEquipped, it)
+		isHeld = okE and isHeld == true
+		if isHeld then
+			held = it
+		end
+		if it.__type == "Gun" then
+			local okA, ammo = pcall(it.GetAmmo, it)
+			if okA and type(ammo) == "number" then
+				local index = type(it.Index) == "number" and it.Index or 99
+				if ammo > 0 then
+					if readyGun == nil or (isHeld and not readyHeld) or (isHeld == readyHeld and index < readyIndex) then
+						readyGun, readyHeld, readyIndex = it, isHeld, index
+					end
+				else
+					local okR, reserve = pcall(it.GetAmmoReserve, it)
+					if okR and type(reserve) == "number" and reserve > 0 then
+						if reloadGun == nil or (isHeld and not reloadHeld) or (isHeld == reloadHeld and index < reloadIndex) then
+							reloadGun, reloadHeld, reloadIndex = it, isHeld, index
+						end
+					end
+				end
+			end
+		end
+	end
+	if readyGun ~= nil then
+		return { Type = readyHeld and "Attack" or "Swap", Item = readyGun }, held
+	end
+	if reloadGun ~= nil then
+		return { Type = reloadHeld and "Reload" or "Swap", Item = reloadGun }, held
+	end
+	return nil, held
+end
+
 -- KH hides with its own evasion plan, UE with UE's void
 local function ragebotStartDelayPlan(arg, arg5, arg6, arg7)
 if isUE() then
@@ -83028,6 +83099,9 @@ ueS.MarkVoid()
 k8xSetStatus("void: " .. why)
 return k8xHidePlan()
 end
+-- k8x does not take KH's weapon choice (arg3 from getAction): it picks and swaps weapons itself.
+local k8xHeld = nil
+arg3, k8xHeld = k8xPickAction(arg)
 -- a reload in progress / starting (Type == "Reload" starts it here, WeaponAction sends the Reload packet)
 local k8xReload = arg:_PlanReloadTransport(arg3)
 if k8xReload ~= nil then
@@ -83038,20 +83112,11 @@ ueS.MarkVoid()
 k8xSetStatus("void: reload")
 return k8xReload
 end
--- The weapon picker (getAction) only knows slots 1 / 2 / 3 and the Weapons.Enabled switches, and returns nil
--- for anything else (a one-weapon mode, a disabled slot). k8x does not care about those switches: if a gun is in
--- hand and has ammo, attack with it.
+-- No usable gun (k8xPickAction found none loaded and none reloadable). If what is in hand is a melee / utility
+-- item (anything that is not a gun), void-spam: sit in the void instead of going near the target.
 if arg3 == nil then
-local heldGun = nil
-pcall(function()
-heldGun = arg._innerContext.ItemBehaviors:EquippedItemAsGun()
-end)
-local okAmmo, heldAmmo = false, 0
-if heldGun ~= nil then
-okAmmo, heldAmmo = pcall(heldGun.GetAmmo, heldGun)
-end
-if heldGun ~= nil and okAmmo and type(heldAmmo) == "number" and heldAmmo > 0 then
-arg3 = { Type = "Attack", Item = heldGun }
+if k8xHeld ~= nil and k8xHeld.__type ~= "Gun" then
+return k8xVoid("void spamming (" .. tostring(k8xHeld.__type) .. ": " .. tostring(k8xHeld.Name) .. ")")
 else
 -- say WHY nothing is usable: every item with its slot index and ammo
 local listed = {}
@@ -86050,7 +86115,7 @@ end)
 -- was nulled in the same frame and never replicated -- the reason this did nothing in game.
 -- It still runs after v199:HeartbeatUpdate(), which stashes the real client CFrame in _oldCFrame
 -- for GetClientCFrame to read. K.UndergroundDebug records why a frame did nothing.
--- Depth is the menu slider (5-15, Movement.Underground.Speed); suspended briefly after the ragebot fires.
+-- Depth is the menu slider (5-15, Movement.Underground.Speed). The ragebot is held off while this is on (K.UndergroundActive).
 local ueUndergroundPose = CFrame.Angles(math.rad(90), 0, 0)
 
 local function applyUnderground()
