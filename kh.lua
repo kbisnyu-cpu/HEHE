@@ -1,3 +1,9 @@
+-- LPH_NO_VIRTUALIZE (Luraph macro). Marks the per-frame callbacks below so Luraph leaves them out of its VM;
+-- see https://docs.luarmor.net/insane-optimization-tricks-and-lph-macro-usage . This fallback keeps the plain
+-- script running when it is not obfuscated: it only returns the function unchanged. It has to stay at the very top.
+loadstring([[
+    function LPH_NO_VIRTUALIZE(f) return f end;
+]])();
 --==========================================================================
 --  Kicia Rebuild  -  Rivals
 --  LxYHook v3, rebuilt from a decompiled build.
@@ -2225,7 +2231,7 @@ local function __LxYPop(win, show)
 		cover.BackgroundTransparency = 1 - 0.92 * (1 - q * q)
 		cover.Visible = true
 	end
-	conn = game:GetService("RunService").RenderStepped:Connect(function()
+	conn = game:GetService("RunService").RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 		if st.token ~= token then conn:Disconnect() return end
 		local a = math.clamp((os.clock() - t0) / dur, 0, 1)
 		local e = game:GetService("TweenService"):GetValue(a, style, Enum.EasingDirection.InOut)
@@ -2239,7 +2245,7 @@ local function __LxYPop(win, show)
 			win.Position = base
 			if not show then win.Visible = false end
 		end
-	end)
+	end))
 end
 local function Hide(Interface, ...)
 	if __LxYIsWindow(Interface) then
@@ -2676,10 +2682,10 @@ local function __LxYTipStep(inst, fn)
 	inst.MouseEnter:Connect(function()
 		__LxYTipActive[fn] = true
 		if __LxYTipConn == nil then
-			__LxYTipConn = game:GetService("RunService").RenderStepped:Connect(function(dt)
+			__LxYTipConn = game:GetService("RunService").RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
 				if next(__LxYTipActive) == nil then __LxYTipConn:Disconnect() __LxYTipConn = nil return end
 				for f in pairs(__LxYTipActive) do task.spawn(f, dt) end
-			end)
+			end))
 		end
 	end)
 	inst.MouseLeave:Connect(function() __LxYTipActive[fn] = nil end)
@@ -3203,9 +3209,9 @@ function Starlight:Notification(data)
 		task.spawn(function() end)
 		table.insert(
 			connections,
-			RunService.RenderStepped:Connect(function()
+			RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 				pcall(setDuration, tick() - creationTime)
-			end)
+			end))
 		)
 
 		notificationAcrylicEvent.Event:Connect(function()
@@ -4335,7 +4341,7 @@ function Starlight:CreateWindow(WindowSettings)
 			-- menu closed too), and the two labels are looked up once
 			local playerUserLabel, clockLabel = Tab.Instances.Page.playerUser, Tab.Instances.Page.clock
 			local shownSecond = nil
-			connections.__homeTabTime = RunService.RenderStepped:Connect(function()
+			connections.__homeTabTime = RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 				local second = os.time()
 				if second == shownSecond then
 					return
@@ -4362,7 +4368,7 @@ function Starlight:CreateWindow(WindowSettings)
 
 				clockLabel.Text =
 					`{formatted}\n{string.format("%02d / %02d / %d", t.day, t.month, t.year)}`
-			end)
+			end))
 		end)
 
 		for _, column in pairs(Tab.Instances.Page.Holder:GetChildren()) do
@@ -4522,7 +4528,7 @@ function Starlight:CreateWindow(WindowSettings)
 			end
 		end
 
-		local function HeartbeatUpdate()
+		local HeartbeatUpdate = LPH_NO_VIRTUALIZE(function()
 			LastIteration = TimeFunction()
 			frameCount += 1
 			windowStart = windowStart or Start or LastIteration
@@ -4540,7 +4546,7 @@ function Starlight:CreateWindow(WindowSettings)
 			if timeLabel.Text ~= timeText then
 				timeLabel.Text = timeText
 			end
-		end
+		end)
 		
 		if TabSettings.Changelog[1] then
 			Tab.Instances.Page.Holder.Center.Changelog.latest.Visible = true
@@ -8725,7 +8731,7 @@ function Starlight:CreateWindow(WindowSettings)
 									end
 								)
 
-								;(__LxYOpenStep or function(_, fn) return RunService.RenderStepped:Connect(fn) end)(NestedElement.Instances[2], function()
+								;(__LxYOpenStep or function(_, fn) return RunService.RenderStepped:Connect(fn) end)(NestedElement.Instances[2], LPH_NO_VIRTUALIZE(function()
 									if mainDragging then
 										local localX = math.clamp(
 											Mouse.X
@@ -8794,7 +8800,7 @@ function Starlight:CreateWindow(WindowSettings)
 										NestedElement.Values.Transparency = 1 - t
 										updateInstances()
 									end
-								end)
+								end))
 							end
 
 							NestedElement.Instances[2].Container.Color.OldColor.MouseButton1Click:Connect(function()
@@ -12070,10 +12076,10 @@ function K.MakeHudDraggable(root, onDrop)
         end
         state.dragging = false
     end))
-    K.track(game:GetService("RunService").Heartbeat:Connect(function()
+    K.track(game:GetService("RunService").Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
         local want = K.MenuOpen == true
         if detector.Enabled ~= want then detector.Enabled = want end
-    end))
+    end)))
     return state
 end
 
@@ -12485,7 +12491,8 @@ do
     -- (rendering off would otherwise spin the loop at 300+ fps). Everything is put back when low-load ends, or when
     -- the script unloads. Server-side logic, physics, animation and the ragebot do not depend on drawing and keep
     -- running (the effect of render-off on the ragebot is not measured yet - hence the "keep 3D" mode).
-    -- K.PerfMode is set from Settings > General > Startup > Low-Load Mode and kept in the file KICIA_PERF_MODE:
+    -- K.PerfMode is set from Settings > General > Startup > Low-Load Mode and kept per account, in the file
+    -- <K.AccountDir>/perf_mode.txt (the old shared file KICIA_PERF_MODE is no longer read):
     --   "auto"   low-load only while the Roblox window is not the active window
     --   "keep3d" same, but 3D rendering stays on (only quality and fps cap drop)
     --   "always" low-load even while the window is active (a single client that is only watched)
@@ -12497,7 +12504,7 @@ do
             if text == label then
                 K.PerfMode = key
                 local wrf = K.fn and K.fn("writefile")
-                if wrf then pcall(wrf, "KICIA_PERF_MODE", key) end
+                if wrf then pcall(wrf, K.AccountDir .. "/perf_mode.txt", key) end
                 return
             end
         end
@@ -12505,8 +12512,9 @@ do
     pcall(function()
         if K.PerfMode == nil then
             K.PerfMode = "off" -- default: off (the user turns it on in Settings > General > Startup > Low-Load Mode)
-            if isfile("KICIA_PERF_MODE") then
-                local t = string.gsub(readfile("KICIA_PERF_MODE"), "%s+", "")
+            local perfFile = K.AccountDir .. "/perf_mode.txt"
+            if isfile(perfFile) then
+                local t = string.gsub(readfile(perfFile), "%s+", "")
                 if K.PerfModes[t] ~= nil then K.PerfMode = t end
             end
         end
@@ -12585,7 +12593,7 @@ do
     function K.UIMark(name)
         K.UILast, K.UILastAt = name, os.clock()
     end
-    hook(RunService.Heartbeat, function(dt)
+    hook(RunService.Heartbeat, LPH_NO_VIRTUALIZE(function(dt)
         frames += 1
         elapsed += dt
         if dt > worstDt then worstDt = dt end
@@ -12601,7 +12609,7 @@ do
                 K.Log("stall", string.format("frame took %.2f s | %s%s", dt, statsLine and statsLine() or "", lastUI))
             end
         end
-    end)
+    end))
     local Stats = game:GetService("Stats")
     function statsLine()
         local fps = elapsed > 0 and frames / elapsed or 0
@@ -30576,7 +30584,7 @@ arg:AddDropdown({
 Label = "UI Style",
 Options = { "Starlight", "Lite", "Matcha", "KH V2", "Setsuna", "Setsuna Drop", "Classic" },
 Default = K.UIMode(),
-Tooltip = "Starlight (default) is built into the script; if it fails, the classic menu is shown for that session. Classic is the script's own menu.",
+Tooltip = "Classic (default) is the script's own menu. Starlight is built into the script; if it fails, the classic menu is shown for that session.",
 OnChanged = function(mode)
 if mode ~= nil and mode ~= K.UIMode() then K.SwitchUI(mode) end
 end,
@@ -31256,7 +31264,7 @@ arg._updateCallbackById[nextUpdateId] = arg2
 arg._updateCount = arg._updateCount + 1
 
 if arg._renderConnection == nil then
-arg._renderConnection = runService.RenderStepped:Connect(function(deltaTime)
+arg._renderConnection = runService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(deltaTime)
 if not arg.Visible then
 return
 end
@@ -31264,7 +31272,7 @@ end
 for _, v136 in arg._updateCallbackById, nil, nil do
 v136(deltaTime)
 end
-end)
+end))
 end
 
 return function()
@@ -38134,9 +38142,9 @@ return tbl18
 end
 
 index2._Initialize = function(arg)
-v115:BindToRenderStep(arg._boundId, Enum.RenderPriority.First.Value, function()
+v115:BindToRenderStep(arg._boundId, Enum.RenderPriority.First.Value, LPH_NO_VIRTUALIZE(function()
 arg:_RenderStepUpdate()
-end)
+end))
 end
 
 index2.SetServerCFrame = function(arg, cframe)
@@ -38156,16 +38164,16 @@ index2.GetClientCFrame = function(arg)
 return arg._oldCFrame or arg._rootPart.CFrame
 end
 
-index2._RenderStepUpdate = function(arg)
+index2._RenderStepUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local oldCFrame = arg._oldCFrame
 
 if oldCFrame ~= nil then
 arg._rootPart.CFrame = oldCFrame
 arg._oldCFrame = nil
 end
-end
+end)
 
-index2.HeartbeatUpdate = function(arg)
+index2.HeartbeatUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local cframe = arg._cframe
 if cframe == nil then
 return
@@ -38177,7 +38185,7 @@ arg._oldCFrame = rootPart.CFrame
 end
 
 rootPart.CFrame = cframe
-end
+end)
 
 index2.Destroy = function(arg)
 arg:_RenderStepUpdate()
@@ -39643,13 +39651,13 @@ index2.FlushViewAngles = function(arg)
 arg._viewAngleDriver:Flush()
 end
 
-index2.HeartbeatUpdate = function(arg)
+index2.HeartbeatUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local rootDesync = arg._rootDesync
 if rootDesync == nil then
 return
 end
 rootDesync:HeartbeatUpdate()
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -40860,13 +40868,13 @@ end
 return v120
 end
 
-index2.HeartbeatUpdate = function(arg)
+index2.HeartbeatUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local inner = arg.Inner
 
 if inner ~= nil then
 inner.CharacterController:HeartbeatUpdate()
 end
-end
+end)
 
 index2.FlushViewAngles = function(arg)
 local inner = arg.Inner
@@ -42783,7 +42791,7 @@ arg._trove:Connect(v115:GetPropertyChangedSignal({ "ItemModifiers", "CounterStab
 refreshCounterStab()
 local runService = game:GetService("RunService")
 for _, signal in { runService.PreRender, runService.PreAnimation, runService.PreSimulation, runService.PostSimulation, runService.Heartbeat } do
-arg._trove:Connect(signal, function()
+arg._trove:Connect(signal, LPH_NO_VIRTUALIZE(function()
 if not arg._counterStabOn then
 return
 end
@@ -42803,7 +42811,7 @@ if arg:_CounterStabCooling(now) then
 return
 end
 pcall(arg._CounterStab, arg, innerContext)
-end)
+end))
 end
 end
 
@@ -43106,16 +43114,16 @@ arg._track = v120
 v120:Play()
 v120:AdjustSpeed(v116.Data.AnimationPlayer.Speed)
 
-arg._loopConnection = v118.RenderStepped:Connect(function()
+arg._loopConnection = v118.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 arg:_Update()
-end)
+end))
 
 if arg2 then
 arg._awaitingOwnership = v86[34]
 end
 end
 
-index2._Update = function(arg)
+index2._Update = LPH_NO_VIRTUALIZE(function(arg)
 local track = arg._track
 if track == nil then
 return
@@ -43138,7 +43146,7 @@ end
 end
 
 arg:_EnforceWindow(track)
-end
+end)
 
 index2._EnforceWindow = function(arg, arg2)
 local length = arg2.Length
@@ -45865,7 +45873,7 @@ arg._mirror = { RealMotors = tbl19, CloneMotors = tbl20, CloneRoot = humanoidRoo
 arg._cloneMotorsByName = nil
 end
 
-index2.PreRenderUpdate = function(l,I)local W=l._mirror;if W==nil then return;end;if I~=nil then W.CloneRoot.CFrame=I;end;I,l=W.RealMotors,W.CloneMotors;for N,P in I,nil,nil do W=l[N];W.C0=P.C0;W.C1=P.C1;W.Transform=P.Transform;end;end
+index2.PreRenderUpdate = LPH_NO_VIRTUALIZE(function(l,I)local W=l._mirror;if W==nil then return;end;if I~=nil then W.CloneRoot.CFrame=I;end;I,l=W.RealMotors,W.CloneMotors;for N,P in I,nil,nil do W=l[N];W.C0=P.C0;W.C1=P.C1;W.Transform=P.Transform;end;end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -46038,7 +46046,7 @@ end
 clone:SetParent(visible and workspace or nil)
 end
 
-index2.PreRenderUpdate = function(arg, arg2)
+index2.PreRenderUpdate = LPH_NO_VIRTUALIZE(function(arg, arg2)
 if not arg._visible then
 return
 end
@@ -46047,7 +46055,7 @@ if clone == nil then
 return
 end
 clone:PreRenderUpdate(arg2)
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -47137,7 +47145,7 @@ arg:_CancelPending()
 arg._activeEmote = { Entity = arg2, Origin = aliveState.RootPart.Position, QuickMeleeAt = fn36() }
 end
 
-index2.PreRender = function(arg)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg)
 local aliveState = arg._aliveState
 if aliveState == nil then
 return
@@ -47159,7 +47167,7 @@ local entity = activeEmote.Entity
 arg._pendingCancel = v115.delay(localPlayer:GetNetworkPing()):andThen(function()
 v118(v102(getmetatable(getmetatable(entity).__index).__index, "CancelEmote"), entity, nil)
 end)
-end
+end)
 
 index2._CancelPending = function(arg)
 local pendingCancel = arg._pendingCancel
@@ -48034,9 +48042,9 @@ index2.GetResolver = function(arg)
 return arg._resolver
 end
 
-index2.PreRender = function(arg)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg)
 arg._emoteCancellation:PreRender()
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -55099,9 +55107,9 @@ index2.GetHookErrors = function(arg)
 return arg._errorReporter:GetErrors()
 end
 
-index2.PreRender = function(arg)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg)
 arg._emotes:PreRender()
-end
+end)
 
 index2.Destroy = function(arg)
 arg:SetRuntimeEnabled(false)
@@ -61881,7 +61889,7 @@ arg._color = color
 end)
 end
 
-index2.Update = function(l,I)if not l._isEnabled then local R=v115.Data.Ragebot;if not(R.EvadeWhenHacking or R.TargetOrder=="HackersFirst" or R.TargetOrder=="LegitFirst" or R.KnifeMode=="Auto")then return;end;end;for W,W in l._fighters.StateByPlayer,nil,nil do if l._notifiedStateSet[W]then continue;end;if l:_IsHacking(W,I)then l:_ClassifyHacker(W);end;end;end
+index2.Update = LPH_NO_VIRTUALIZE(function(l,I)if not l._isEnabled then local R=v115.Data.Ragebot;if not(R.EvadeWhenHacking or R.TargetOrder=="HackersFirst" or R.TargetOrder=="LegitFirst" or R.KnifeMode=="Auto")then return;end;end;for W,W in l._fighters.StateByPlayer,nil,nil do if l._notifiedStateSet[W]then continue;end;if l:_IsHacking(W,I)then l:_ClassifyHacker(W);end;end;end)
 
 index2._ClassifyHacker = function(arg, arg2)
 if not arg._playerTags:Add(arg2.Player, "Hacker") then
@@ -65376,7 +65384,7 @@ v123 = nil
 cameraType = nil
 end
 
-v120:BindToRenderStep(v122, Enum.RenderPriority.Camera.Value + v86[63], function()
+v120:BindToRenderStep(v122, Enum.RenderPriority.Camera.Value + v86[63], LPH_NO_VIRTUALIZE(function()
 local currentCamera = workspace.CurrentCamera
 
 if currentCamera ~= v123 then
@@ -65413,7 +65421,7 @@ end
 if flag19 then
 currentCamera.CFrame = cFrame
 end
-end)
+end))
 
 arg._trove:Add(function()
 v120:UnbindFromRenderStep(v122)
@@ -65988,7 +65996,7 @@ table.insert(arg._chams, v123)
 end
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 arg._killFlash:Update(arg2)
 
 for i = #arg._chams, 1, -1 do
@@ -65996,7 +66004,7 @@ if not arg._chams[i]:Step(arg2) then
 table.remove(arg._chams, i)
 end
 end
-end
+end)
 
 index2.Destroy = function(arg)
 for _, v123 in arg._chams, nil, nil do
@@ -66239,7 +66247,7 @@ table.insert(arg._chams, v124)
 end
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 arg._hitFlash:Update(arg2)
 
 for i = #arg._chams, 1, -1 do
@@ -66247,7 +66255,7 @@ if not arg._chams[i]:Step(arg2) then
 table.remove(arg._chams, i)
 end
 end
-end
+end)
 
 index2.Destroy = function(arg)
 for _, v124 in arg._chams, nil, nil do
@@ -67296,7 +67304,7 @@ end
 table.insert(activeEffects, arg2)
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 local activeEffects = arg._activeEffects
 if #activeEffects == 0 then
 return
@@ -67322,7 +67330,7 @@ arg:_RecycleEffect(v119)
 table.remove(activeEffects, i)
 end
 end
-end
+end)
 
 index2._SpawnCircle = function(arg, arg2, color3, arg3, arg4)
 local v119 = arg:_AcquireCircle()
@@ -70004,7 +70012,7 @@ local n34 = arg.ContractFrom + v86[63] / #arg._parts * arg.FadeLength
 local maxRadius = arg.MaxRadius
 local minThicknessMultiplier = arg.MinThicknessMultiplier
 
-arg._dissipateConnection = v121.Heartbeat:Connect(function()
+arg._dissipateConnection = v121.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 local n35 = os.clock() - now2
 arg.MinThicknessMultiplier = minThicknessMultiplier + (-v86[56] - minThicknessMultiplier) * n35 / n
 
@@ -70028,7 +70036,7 @@ end
 
 arg._dissipateConnection = nil
 end
-end)
+end))
 end
 
 index2._UpdateGeometry = function(I,W,N,P,a,e,c,E)local p,T=1-I.MaxTransparency,1-I.MinTransparency;local t=I.OpacityProfileFunction(N,P,I.PulseSpeed,I.PulseLength,I.FadeLength,p,T);p=I.Thickness*a*t;t=p>0 and t or 0;local T=1-I.ContractFrom;local x=1/(E*I.FadeLength);if t>T then W.Size=Vector3.new((c-e).Magnitude,p,p);W.CFrame=CFrame.lookAt((e+c)*0.5,c)* v115 .XInverse;W.Transparency=1-t;return true;elseif t>T-x then a=(1-(t-(T-x))*E*I.FadeLength)*(N<P*I.PulseSpeed-0.5*I.PulseLength and 1 or-1);W.Size=Vector3.new((1-math.abs(a))*(c-e).Magnitude,p,p);W.CFrame=CFrame.lookAt(e+(c-e)*(math.max(0,a)+0.5*(1-math.abs(a))),c)* v115 .XInverse;W.Transparency=1-t;return true;end;W.Transparency=1;return false;end
@@ -71088,12 +71096,12 @@ end
 blurEffect.Size = blurEffect.Size + (math.clamp(fn36(cFrame, lastCameraCFrame, arg2) * motionBlur.Sensitivity, 0, motionBlur.Intensity) - blurEffect.Size) * math.min(1, arg2 * v86[149])
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 if arg._activeTrove == nil then
 return
 end
 arg:_OnPreRender(arg2)
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -71864,10 +71872,10 @@ end
 return setmetatable(tbl18, index2)
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 arg._motionBlurController:PreRender(arg2)
 arg._weatherController:Update()
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -72448,7 +72456,7 @@ local function fn35()
         hud.gui.Enabled = true
         hud.server.Text = serverInfo()
         local frames, pingFrames, last = 0, 0, os.clock()
-        hudConn = RunService.RenderStepped:Connect(function()
+        hudConn = RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
             frames = frames + 1
             pingFrames = pingFrames + 1
             local now = os.clock()
@@ -72468,7 +72476,7 @@ local function fn35()
                 pingFrames = 0
                 hud.server.Text = serverInfo()
             end
-        end)
+        end))
     end
     local function stopHud()
         if hudConn then hudConn:Disconnect() hudConn = nil end
@@ -78994,14 +79002,14 @@ end
 -- the ragebot calls Hide / Update every frame while its controller runs; with nobody calling (no controller yet,
 -- ragebot switched off further up) this keeps the card going on its own
 local lastCall = 0
-local standalone = game:GetService("RunService").Heartbeat:Connect(function()
+local standalone = game:GetService("RunService").Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 if os.clock() - lastCall < 0.25 then return end
 if alwaysShow() then
 pcall(updateCard, fallbackTarget(), true)
 else
 hide()
 end
-end)
+end))
 K.onUnload(function() standalone:Disconnect() end)
 
 return {
@@ -81700,7 +81708,7 @@ end
 -- Restore the teleported root before the frame is drawn so our view never
 -- shows the jump (the shot already reached the server on Heartbeat).
 local RAGE_RESTORE = PREFIX .. "RageRestore"
-local function rageRestoreRoot()
+local rageRestoreRoot = LPH_NO_VIRTUALIZE(function()
 	-- Release the physics-root glue first so restoring the CFrame sticks. With Hub-style glue
 	-- (Other hub mode) it stays bound like in the other hub (it never unbinds); it is released
 	-- by rageGlueReleaseAll, and re-set on every attacking frame.
@@ -81746,7 +81754,7 @@ local function rageRestoreRoot()
 			rage._lastRealCF = root.CFrame
 		end
 	end
-end
+end)
 -- The RenderStepped hook has a switch (Ragebot > "RenderStepped restore").
 function rage.setRenderRestore(on)
 	pcall(function()
@@ -82089,7 +82097,7 @@ end
 
 local active = false
 local syncAt = 0
-local carefulHeartbeat = RunService.Heartbeat:Connect(function(dt)
+local carefulHeartbeat = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function(dt)
 local want = tbl17.ragebotKeyOn == true and K.RagebotStyle(config.Data.Ragebot.KnifeMode) == "Careful" and not K.UndergroundActive()
 if want ~= active then
 active = want
@@ -82124,7 +82132,7 @@ syncAt = now
 syncSettings()
 end
 rageHeartbeatStep(dt)
-end)
+end))
 table.insert(cleanup, carefulHeartbeat)
 
 K.onUnload(function()
@@ -86339,7 +86347,7 @@ do
 end
 
 --==========================================================================
---  UI form: "Starlight" (default) or "Classic" (the script's own menu). Chosen at startup from getgenv().LxYUI or
+--  UI form: "Classic" (default, the script's own menu) or "Starlight". Chosen at startup from getgenv().LxYUI or
 --  the file kiciarebuild/ui_style.txt, switched live from Settings > General > UI Style.
 --  (ui_style.txt replaces the old ui_mode.txt, so a Classic choice saved before Starlight became the default is ignored.)
 --==========================================================================
@@ -86358,7 +86366,7 @@ do
                 if valid(text) then return text end
             end
         end
-        return "Starlight"
+        return "Classic"
     end
     function K.SetUIMode(m)
         if not valid(m) then return end
@@ -92377,7 +92385,7 @@ do
     local function startTick()
         if tickConn ~= nil then return end
         local last = 0
-        tickConn = RunService.Heartbeat:Connect(function(dt)
+        tickConn = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function(dt)
             frames += 1
             local now = os.clock()
             if now - fpsAt >= 0.5 then
@@ -92388,7 +92396,7 @@ do
                 dirty, last = false, now
                 pcall(repaint)
             end
-        end)
+        end))
     end
 
     function KeyHud.ensure(name, watermark, keybinds)
@@ -92863,7 +92871,7 @@ local function setup()
 		end
 		for _, folder in viewmodelFolders() do watchFolder(folder) end
 		local sweepAt = os.clock()
-		trackStopper = RunService.Heartbeat:Connect(function()
+		trackStopper = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 			local now = os.clock()
 			if now - sweepAt < 0.5 then return end
 			sweepAt = now
@@ -92887,7 +92895,7 @@ local function setup()
 					stopMatching(animator)
 				end
 			end
-		end)
+		end))
 	end
 
 	local function setAnimationDisabled(kind, on)
@@ -93659,7 +93667,7 @@ function offsetCache.models()
 	return list
 end
 track(offsetCache.drop)
-RunService:BindToRenderStep(VIEWMODEL_STEP, Enum.RenderPriority.Last.Value, function()
+RunService:BindToRenderStep(VIEWMODEL_STEP, Enum.RenderPriority.Last.Value, LPH_NO_VIRTUALIZE(function()
 	if viewmodel.Offset then
 		local offset = CFrame.new(viewmodel.X, viewmodel.Y, viewmodel.Z)
 		for _, model in offsetCache.models() do
@@ -93684,7 +93692,7 @@ RunService:BindToRenderStep(VIEWMODEL_STEP, Enum.RenderPriority.Last.Value, func
 		lastChamScan = now
 		refreshChams()
 	end
-end)
+end))
 track(function()
 	RunService:UnbindFromRenderStep(VIEWMODEL_STEP)
 	clearChams()
@@ -95933,15 +95941,29 @@ local boot = (function()
         -- deleted when it is off) and LOAD_SILENTLY marks a silent load. The queued loader checks
         -- isfile("LOAD_PERSISTENT") itself, so turning the toggle off still cancels the re-run.
         local PERSIST_FILE = "LOAD_PERSISTENT"
-        -- What the queued loader runs. getgenv().KiciaRerunFile (a workspace file) wins if set;
-        -- otherwise the script is downloaded from the public GitHub repo kbisnyu-cpu/HEHE (branch main, kh.lua),
-        -- so Re-run works without a local copy of the script. A raw.githubusercontent.com address is sent with
-        -- a GitHub token when one exists (workspace file kiciarebuild/github_token.txt, or
-        -- getgenv().KiciaGithubToken), which is only needed for a private repo; with no token it is a plain
-        -- game:HttpGet. The token is never written into this script. getgenv().KiciaRerunUrl overrides the
-        -- address (e.g. a private repo together with a token).
-        local RERUN_URL = getgenv().KiciaRerunUrl
-            or "https://raw.githubusercontent.com/kbisnyu-cpu/HEHE/main/kh.lua"
+        -- What the queued loader runs: only the Luarmor loader (no GitHub, no local copy). Its address is
+        -- getgenv().KiciaRerunUrl, or else the workspace file kiciarebuild/luarmor_loader.txt, which holds the loader
+        -- address (https://api.luarmor.net/files/v3/loaders/<id>.lua) or the whole line
+        -- loadstring(game:HttpGet("..."))(). The key is the script_key set in getgenv() (it is put in front of the
+        -- queued loader, which is what the Luarmor loader reads). Without either, this script's own loader below is used.
+        local RERUN_LOADER_FILE = "kiciarebuild/luarmor_loader.txt"
+        -- the script's own Luarmor loader (the address is public; every user needs their own script_key), used when
+        -- neither getgenv().KiciaRerunUrl nor the file above gives another one
+        local RERUN_DEFAULT_LOADER = "https://api.luarmor.net/files/v4/loaders/d2b05e953ac72861d1cfd7e9297caccd.lua"
+        local function rerunUrl()
+            local u = getgenv().KiciaRerunUrl
+            if type(u) == "string" and u ~= "" then return u end
+            local isf, rdf = K.fn("isfile"), K.fn("readfile")
+            if isf and rdf and isf(RERUN_LOADER_FILE) then
+                local ok, text = pcall(rdf, RERUN_LOADER_FILE)
+                if ok and type(text) == "string" then
+                    local url = string.match(text, "https?://[%w%.%-_/%%:]+luarmor%.net/[%w%.%-_/%%]+")
+                        or string.match(text, "https?://[^%s\"'%)]+")
+                    if url then return url end
+                end
+            end
+            return RERUN_DEFAULT_LOADER
+        end
         local RERUN_LOADER = [[
 if not isfile("LOAD_PERSISTENT") then return end
 local _env = (getgenv and getgenv()) or _G
@@ -96020,26 +96042,6 @@ local function _fetch()
     local ok, res
     if _file ~= "" then
         ok, res = pcall(readfile, _file)
-    elseif string.find(_url, "raw.githubusercontent.com", 1, true) then
-        -- GitHub raw address: with a token (kiciarebuild/github_token.txt) the request carries it, which a
-        -- private repo needs; without one, or if that request fails, a plain HttpGet (public repos)
-        local _tok = _env.KiciaGithubToken
-        if (not _tok or _tok == "") and isfile("kiciarebuild/github_token.txt") then
-            local okT, t = pcall(readfile, "kiciarebuild/github_token.txt")
-            if okT and type(t) == "string" then _tok = string.gsub(t, "[\r\n\t ]", "") end
-        end
-        local _req = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
-        if _req and _tok and _tok ~= "" then
-            local okR, resp = pcall(_req, { Url = _url, Method = "GET", Headers = { Authorization = "token " .. _tok, ["User-Agent"] = "KiciaRerun" } })
-            if okR and type(resp) == "table" and resp.StatusCode == 200 then
-                ok, res = true, resp.Body
-            else
-                _log("github fetch with token failed: " .. tostring(okR and type(resp) == "table" and resp.StatusCode or resp))
-            end
-        end
-        if not ok then
-            ok, res = pcall(game.HttpGet, game, _url)
-        end
     else
         ok, res = pcall(game.HttpGet, game, _url)
     end
@@ -96152,10 +96154,9 @@ pcall(function() _find("KiciaRerunClaim"):Destroy() end)
                 end
                 return
             end
-            local file = getgenv().KiciaRerunFile
-            local isfile_ = K.fn("isfile")
-            if enabled and file and isfile_ and not isfile_(file) then
-                warn("[Kicia Rebuild] Re-run After Teleport: file `" .. file .. "` not found in the workspace")
+            local url = rerunUrl()
+            if enabled and url == "" then
+                warn("[Kicia Rebuild] Re-run After Teleport: put the Luarmor loader address in `" .. RERUN_LOADER_FILE .. "` (or set getgenv().KiciaRerunUrl)")
                 enabled = false
             end
             if enabled then
@@ -96166,7 +96167,7 @@ pcall(function() _find("KiciaRerunClaim"):Destroy() end)
             end
             local job = tostring(game.JobId)
             if enabled and queuedJob ~= job then
-                local src = RERUN_LOADER:format(file or "", RERUN_URL)
+                local src = RERUN_LOADER:format("", url)
                 local key = getgenv().script_key
                 if type(key) == "string" and key ~= "" then
                     src = string.format("script_key=%q; ", key) .. src
@@ -96503,7 +96504,7 @@ do -- DH
         --  smoothed screen position of the HUD origin (px); starts at the first target
         local posX, posY
 
-        local function updateFrame(dt)
+        local updateFrame = LPH_NO_VIRTUALIZE(function(dt)
             local s = config.Data and config.Data.DivisionHud
             if type(s) ~= "table" or not s.Enabled then
                 put(root, "Visible", false)
@@ -96646,15 +96647,15 @@ do -- DH
                 put(speedLabel, "Text", string.format("%d u/s", math.floor(speed + 0.5)))
                 put(speedLabel, "TextColor3", accent)
             end
-        end
+        end)
 
-        local conn = K.track(RunService.RenderStepped:Connect(function(dt)
+        local conn = K.track(RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
             local ok, err = pcall(updateFrame, dt)
             if not ok and not K.__dhWarned then
                 K.__dhWarned = true
                 warn("[Kicia DivisionHud] " .. tostring(err))
             end
-        end))
+        end)))
         K.onUnload(function()
             started = false
             pcall(function() conn:Disconnect() end)
@@ -96864,7 +96865,7 @@ do -- TMH
             return RED
         end
 
-        local function updateFrame(dt)
+        local updateFrame = LPH_NO_VIRTUALIZE(function(dt)
             if dt and dt > 0 then fps = fps + (1 / dt - fps) * 0.05 end
             local s = config.Data and config.Data.TeamHud
             if type(s) ~= "table" or not s.Enabled or LocalPlayer:GetAttribute("EnvironmentID") == nil then
@@ -96960,15 +96961,15 @@ do -- TMH
             end
             put(root, "Size", UDim2.fromOffset(WIDTH, footerY + (showTarget and FOOTER_H or 4)))
             put(root, "Visible", true)
-        end
+        end)
 
-        local conn = K.track(RunService.RenderStepped:Connect(function(dt)
+        local conn = K.track(RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
             local ok, err = pcall(updateFrame, dt)
             if not ok and not K.__tmhWarned then
                 K.__tmhWarned = true
                 warn("[Kicia TeamHud] " .. tostring(err))
             end
-        end))
+        end)))
         K.onUnload(function()
             started = false
             pcall(function() conn:Disconnect() end)
@@ -97172,7 +97173,7 @@ do -- SCH
             return list[1] .. "\n+" .. (#list - 1)
         end
 
-        local function updateFrame()
+        local updateFrame = LPH_NO_VIRTUALIZE(function()
             local s = config.Data and config.Data.ScoreHud
             local data = duelData()
             local myTeam = LocalPlayer:GetAttribute("TeamID")
@@ -97247,15 +97248,15 @@ do -- SCH
                 put(leadLine, "Text", paint("tied", YELLOW))
             end
             put(root, "Visible", true)
-        end
+        end)
 
-        local conn = K.track(RunService.RenderStepped:Connect(function()
+        local conn = K.track(RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
             local ok, err = pcall(updateFrame)
             if not ok and not K.__schWarned then
                 K.__schWarned = true
                 warn("[Kicia ScoreHud] " .. tostring(err))
             end
-        end))
+        end)))
         K.onUnload(function()
             started = false
             pcall(function() conn:Disconnect() end)
