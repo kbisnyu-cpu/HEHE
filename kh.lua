@@ -95926,21 +95926,23 @@ local boot = (function()
 
     -- Re-run After Teleport (UE style, from the decompiled UE: protos 255 / 274 and the queue call in proto 1):
     --   * the toggle only writes / deletes the marker file LOAD_PERSISTENT (Silent Load: LOAD_SILENTLY);
-    --   * once per server, while loading, the loader is queued with queue_on_teleport - and only when a
-    --     script_key exists (no key, nothing is queued). The queue does not depend on the toggle;
-    --   * the queued loader checks isfile("LOAD_PERSISTENT") itself when it runs in the next server, sets
-    --     script_key / SILENT and runs the Luarmor loader. That loads this script again, which queues the next one.
+    --   * once per server, while loading, the loader is queued with queue_on_teleport. This build needs NO
+    --     script_key. The queue does not depend on the toggle;
+    --   * the queued loader checks isfile("LOAD_PERSISTENT") itself when it runs in the next server, sets SILENT
+    --     and loads the script (a workspace file, or the address below). That loads this script again, which
+    --     queues the next one.
     do
         local PERSIST_FILE = "LOAD_PERSISTENT"
         local SILENT_FILE = "LOAD_SILENTLY"
-        -- this script's own Luarmor loader (the address is public; every user needs their own script_key);
-        -- getgenv().KiciaRerunUrl replaces it
-        local RERUN_DEFAULT_LOADER = "https://api.luarmor.net/files/v4/loaders/d2b05e953ac72861d1cfd7e9297caccd.lua"
-        -- UE's template, with the key and SILENT also put into getgenv() (Real's globals are not always getgenv())
-        local RERUN_TEMPLATE = "\t\tif (not isfile(\"LOAD_PERSISTENT\")) then\n\t\t\treturn;\n\t\tend;\n"
-            .. "\t\tscript_key, SILENT = \"%s\", isfile(\"LOAD_SILENTLY\");\n"
-            .. "\t\tpcall(function() local e = getgenv(); e.script_key = script_key; e.SILENT = SILENT; end);\n"
-            .. "\t\tloadstring(game:HttpGet(\"%s\"))();\n\t\t"
+        -- What the queued loader runs: getgenv().KiciaRerunFile (a workspace file) if set, else the address
+        -- getgenv().KiciaRerunUrl, else the public GitHub copy of the script (no key, no token)
+        local RERUN_DEFAULT_URL = "https://raw.githubusercontent.com/kbisnyu-cpu/HEHE/main/kh.lua"
+        -- UE's template shape, with SILENT also put into getgenv() (Real's globals are not always getgenv())
+        local RERUN_HEAD = "\t\tif (not isfile(\"LOAD_PERSISTENT\")) then\n\t\t\treturn;\n\t\tend;\n"
+            .. "\t\tSILENT = isfile(\"LOAD_SILENTLY\");\n"
+            .. "\t\tpcall(function() getgenv().SILENT = SILENT; end);\n"
+        local RERUN_FROM_URL = RERUN_HEAD .. "\t\tloadstring(game:HttpGet(%s))();\n\t\t"
+        local RERUN_FROM_FILE = RERUN_HEAD .. "\t\tloadstring(readfile(%s))();\n\t\t"
 
         local queueFn = K.fn("queue_on_teleport") or K.fn("queueonteleport")
         if queueFn == nil then
@@ -95982,17 +95984,7 @@ local boot = (function()
             end
         end
 
-        -- the Luarmor key: where the loader that started this script left it
-        local function rerunKey()
-            local key
-            pcall(function() key = getgenv().script_key end)
-            if type(key) ~= "string" or key == "" then pcall(function() key = _G.script_key end) end
-            if type(key) ~= "string" or key == "" then pcall(function() key = script_key end) end
-            if type(key) == "string" and key ~= "" then return key end
-            return nil
-        end
-
-        -- queue once for this server (UE: proto 1, pcall(queue_on_teleport, template:format(script_key)))
+        -- queue once for this server (UE: proto 1, pcall(queue_on_teleport, template)) - no key needed
         local queued = false
         local function queueLoader()
             if queued then return end
@@ -96000,16 +95992,22 @@ local boot = (function()
                 if rerunEnabled() then warn("[Kicia Rebuild] Re-run After Teleport: executor has no queue_on_teleport") end
                 return
             end
-            local key = rerunKey()
-            if not key then
-                if rerunEnabled() then
-                    warn("[Kicia Rebuild] Re-run After Teleport: no script_key found, nothing queued")
+            local src
+            local file = getgenv().KiciaRerunFile
+            if type(file) == "string" and file ~= "" then
+                if isf and not isf(file) then
+                    if rerunEnabled() then
+                        warn("[Kicia Rebuild] Re-run After Teleport: file `" .. file .. "` not found in the workspace")
+                    end
+                    return
                 end
-                return
+                src = string.format(RERUN_FROM_FILE, string.format("%q", file))
+            else
+                local url = getgenv().KiciaRerunUrl
+                if type(url) ~= "string" or url == "" then url = RERUN_DEFAULT_URL end
+                src = string.format(RERUN_FROM_URL, string.format("%q", url))
             end
-            local url = getgenv().KiciaRerunUrl
-            if type(url) ~= "string" or url == "" then url = RERUN_DEFAULT_LOADER end
-            if pcall(queueFn, string.format(RERUN_TEMPLATE, key, url)) then
+            if pcall(queueFn, src) then
                 queued = true
                 K.Log("rerun", "loader queued")
             else
