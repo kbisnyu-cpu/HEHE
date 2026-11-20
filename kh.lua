@@ -72869,7 +72869,7 @@ local function fn35()
         local part = track(buildPF():Clone())
         part.CFrame = CFrame.new(pos)
         part.Parent = Workspace
-        local head = true   -- body hits use the head hit's font (italic, big, thick outline); only the colour still depends on the part
+        local head = false   -- head hits use the body hit's font (regular, normal size, thin outline); only the colour still depends on the part
         local scale = head and 1.75 or 1
         local bb = part.BillboardDamage
         local main, shadow = bb.TextDamage, bb.TextDamageShadow
