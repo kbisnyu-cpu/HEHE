@@ -73209,6 +73209,7 @@ local function fn35()
     function DT.show(char, damage, part, hitPart, force)
         if force ~= true and cfg("Enabled", false) ~= true then return end
         if typeof(char) ~= "Instance" or type(damage) ~= "number" then return end
+        damage = math.floor(damage + 0.5)   -- whole numbers only, no decimal point
         local pos
         if typeof(hitPart) == "Instance" and hitPart:IsA("BasePart") then pos = hitPart.Position end
         if not pos then
