@@ -1,3 +1,13 @@
+-- LPH_NO_VIRTUALIZE (Luraph macro). Marks the per-frame callbacks below so Luraph leaves them out of its VM;
+-- see https://docs.luarmor.net/insane-optimization-tricks-and-lph-macro-usage . This fallback keeps the plain
+-- script running when it is not obfuscated: it only returns the function unchanged. It has to stay at the very top.
+loadstring([[
+    function LPH_NO_VIRTUALIZE(f) return f end;
+]])();
+-- Console output is switched off: every print / warn of this script goes through KQ, which does nothing. Set
+-- getgenv().KiciaDebug = true before running the script to get the console output back (the log files are
+-- written either way).
+KQ = (getgenv and getgenv().KiciaDebug) and print or function() end
 --==========================================================================
 --  Kicia Rebuild  -  Rivals
 --  LxYHook v3, rebuilt from a decompiled build.
@@ -8,29 +18,32 @@
 -- the hidden UI container - which every chunk in this server sees. The check and the claim happen with no yield
 -- in between. A copy that is still loading is waited for (up to 45 s) and only then unloaded, because unloading a
 -- half-built copy leaves whatever it builds afterwards on screen. If several copies start together the newest wins.
-if not game:IsLoaded() then game.Loaded:Wait() end
--- Boot gate (from fix.txt): the game's controller modules error when they are required before the client has
--- finished replicating them, and KH requires them while it loads. So wait until PlayerScripts.Controllers exists
--- and the client is alive (character with a Humanoid, at least two ScreenGuis; 45 s cap) before doing anything.
+-- Boot gate (from fix.txt, relaxed): the game's controller modules error when they are required before the client has
+-- finished replicating them, and KH requires them while it loads. So wait until PlayerScripts.Controllers exists and
+-- FighterController is in it (that is the replication this really needs; game.Loaded is no longer waited for), then
+-- give the character (with a Humanoid) and the first two ScreenGuis at most 10 s before going on.
 do
     local _players = game:GetService("Players")
     local _t0 = os.clock()
     while not _players.LocalPlayer and os.clock() - _t0 < 60 do task.wait() end
     local _lp = _players.LocalPlayer
-    if not _lp then warn("[Kicia] ABORTED: no LocalPlayer after 60s") return end
+    if not _lp then KQ("[Kicia] ABORTED: no LocalPlayer after 60s") return end
     pcall(function() _lp:WaitForChild("PlayerScripts", 60) end)
     local _ps = _lp:FindFirstChild("PlayerScripts")
-    if not _ps then warn("[Kicia] ABORTED: no PlayerScripts") return end
+    if not _ps then KQ("[Kicia] ABORTED: no PlayerScripts") return end
     if not _ps:FindFirstChild("Controllers") then
-        print("[Kicia] waiting for PlayerScripts.Controllers ...")
+        KQ("[Kicia] waiting for PlayerScripts.Controllers ...")
         pcall(function() _ps:WaitForChild("Controllers", 30) end)
     end
     if not _ps:FindFirstChild("Controllers") then
-        warn("[Kicia] ABORTED: PlayerScripts.Controllers not found. This script is built for Rivals.")
+        KQ("[Kicia] ABORTED: PlayerScripts.Controllers not found. This script is built for Rivals.")
         return
     end
+    if not _ps.Controllers:FindFirstChild("FighterController") then
+        pcall(function() _ps.Controllers:WaitForChild("FighterController", 30) end)
+    end
     local _t1 = os.clock()
-    while os.clock() - _t1 < 45 do
+    while os.clock() - _t1 < 10 do
         local _ch = _lp.Character
         local _pg = _lp:FindFirstChild("PlayerGui")
         local _alive = _ch ~= nil and _ch:FindFirstChildOfClass("Humanoid") ~= nil
@@ -43,10 +56,17 @@ do
             _ui = _n >= 2
         end
         if _alive and _ui then break end
-        task.wait(1)
+        task.wait(0.2)
     end
 end
-local K = { connections = {}, cleanups = {}, destroyed = false, loading = true, Game = game }
+local K = { connections = {}, cleanups = {}, destroyed = false, loading = true, Game = game, LoadT0 = os.clock() }
+-- load profiler: K.Mark(name) logs (kiciarebuild/logs/session_*.log, level "load") how long the part since the previous mark took
+K.Mark = function(name)
+    local t = os.clock()
+    local last = K.MarkLast or K.LoadT0
+    K.MarkLast = t
+    if K.Log then pcall(K.Log, "load", string.format("%-30s +%.2fs (total %.2fs)", name, t - last, t - K.LoadT0)) end
+end
 do
     local MARK = "KiciaRebuildInstance"
     local holders = {}
@@ -2225,7 +2245,7 @@ local function __LxYPop(win, show)
 		cover.BackgroundTransparency = 1 - 0.92 * (1 - q * q)
 		cover.Visible = true
 	end
-	conn = game:GetService("RunService").RenderStepped:Connect(function()
+	conn = game:GetService("RunService").RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 		if st.token ~= token then conn:Disconnect() return end
 		local a = math.clamp((os.clock() - t0) / dur, 0, 1)
 		local e = game:GetService("TweenService"):GetValue(a, style, Enum.EasingDirection.InOut)
@@ -2239,7 +2259,7 @@ local function __LxYPop(win, show)
 			win.Position = base
 			if not show then win.Visible = false end
 		end
-	end)
+	end))
 end
 local function Hide(Interface, ...)
 	if __LxYIsWindow(Interface) then
@@ -2676,10 +2696,10 @@ local function __LxYTipStep(inst, fn)
 	inst.MouseEnter:Connect(function()
 		__LxYTipActive[fn] = true
 		if __LxYTipConn == nil then
-			__LxYTipConn = game:GetService("RunService").RenderStepped:Connect(function(dt)
+			__LxYTipConn = game:GetService("RunService").RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
 				if next(__LxYTipActive) == nil then __LxYTipConn:Disconnect() __LxYTipConn = nil return end
 				for f in pairs(__LxYTipActive) do task.spawn(f, dt) end
-			end)
+			end))
 		end
 	end)
 	inst.MouseLeave:Connect(function() __LxYTipActive[fn] = nil end)
@@ -3203,9 +3223,9 @@ function Starlight:Notification(data)
 		task.spawn(function() end)
 		table.insert(
 			connections,
-			RunService.RenderStepped:Connect(function()
+			RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 				pcall(setDuration, tick() - creationTime)
-			end)
+			end))
 		)
 
 		notificationAcrylicEvent.Event:Connect(function()
@@ -3479,8 +3499,8 @@ function Starlight:CreateWindow(WindowSettings)
 		and (WindowSettings.BuildWarnings == nil and true or WindowSettings.BuildWarnings)
 	then
 		warned = true
-		warn("Starlight | Build Mismatch")
-		warn(
+		KQ("Starlight | Build Mismatch")
+		KQ(
 			"Starlight may run into issues as it seems you are running an incompatible interface version ("
 				.. (StarlightUI.Resources:FindFirstChild("Build") and StarlightUI.Resources:FindFirstChild("Build").Value or "No Build")
 				.. "). of Starlight\n\nThis version of Starlight is intended for interface build "
@@ -3664,7 +3684,7 @@ function Starlight:CreateWindow(WindowSettings)
 			"rbxassetid://80990588449079", -- loading circle
 		}, function(asset)
 			if debugV then
-				print(`loaded asset {asset}`)
+				KQ(`loaded asset {asset}`)
 			end
 		end)
 
@@ -4082,8 +4102,8 @@ function Starlight:CreateWindow(WindowSettings)
 						local Success, Response = pcall(Action.Callback)
 
 						if not Success then
-							warn(`Starlight Interface Suite - Callback Error | Dialog {Modal.Values.Name}`)
-							print(Response)
+							KQ(`Starlight Interface Suite - Callback Error | Dialog {Modal.Values.Name}`)
+							KQ(Response)
 							if WindowSettings.NotifyOnCallbackError then
 								Starlight:Notification({
 									Title = Modal.Values.Name .. " Callback Error",
@@ -4127,8 +4147,8 @@ function Starlight:CreateWindow(WindowSettings)
 							end)
 
 							if not Success then
-								warn(`Starlight Interface Suite - Callback Error | Dialog {Modal.Values.Name}`)
-								print(Response)
+								KQ(`Starlight Interface Suite - Callback Error | Dialog {Modal.Values.Name}`)
+								KQ(Response)
 								if WindowSettings.NotifyOnCallbackError then
 									Starlight:Notification({
 										Title = Modal.Values.Name .. " Callback Error",
@@ -4335,7 +4355,7 @@ function Starlight:CreateWindow(WindowSettings)
 			-- menu closed too), and the two labels are looked up once
 			local playerUserLabel, clockLabel = Tab.Instances.Page.playerUser, Tab.Instances.Page.clock
 			local shownSecond = nil
-			connections.__homeTabTime = RunService.RenderStepped:Connect(function()
+			connections.__homeTabTime = RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 				local second = os.time()
 				if second == shownSecond then
 					return
@@ -4362,7 +4382,7 @@ function Starlight:CreateWindow(WindowSettings)
 
 				clockLabel.Text =
 					`{formatted}\n{string.format("%02d / %02d / %d", t.day, t.month, t.year)}`
-			end)
+			end))
 		end)
 
 		for _, column in pairs(Tab.Instances.Page.Holder:GetChildren()) do
@@ -4522,7 +4542,7 @@ function Starlight:CreateWindow(WindowSettings)
 			end
 		end
 
-		local function HeartbeatUpdate()
+		local HeartbeatUpdate = LPH_NO_VIRTUALIZE(function()
 			LastIteration = TimeFunction()
 			frameCount += 1
 			windowStart = windowStart or Start or LastIteration
@@ -4540,7 +4560,7 @@ function Starlight:CreateWindow(WindowSettings)
 			if timeLabel.Text ~= timeText then
 				timeLabel.Text = timeText
 			end
-		end
+		end)
 		
 		if TabSettings.Changelog[1] then
 			Tab.Instances.Page.Holder.Center.Changelog.latest.Visible = true
@@ -6214,8 +6234,8 @@ function Starlight:CreateWindow(WindowSettings)
 
 								if not Success then
 									ElementInstance["PART_Backdrop"].Header.Header.Text = "Callback Error"
-									warn(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
-									print(Response)
+									KQ(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
+									KQ(Response)
 									if WindowSettings.NotifyOnCallbackError then
 										Starlight:Notification({
 											Title = Element.Values.Name .. " Callback Error",
@@ -6443,10 +6463,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 									if not Success then
 										ElementInstance.Header.Text = "Callback Error"
-										warn(
+										KQ(
 											`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`
 										)
-										print(Response)
+										KQ(Response)
 										if WindowSettings.NotifyOnCallbackError then
 											Starlight:Notification({
 												Title = Element.Values.Name .. " Callback Error",
@@ -6479,10 +6499,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 									if not Success then
 										ElementInstance.Header.Text = "Callback Error"
-										warn(
+										KQ(
 											`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`
 										)
-										print(Response)
+										KQ(Response)
 										if WindowSettings.NotifyOnCallbackError then
 											Starlight:Notification({
 												Title = Element.Values.Name .. " Callback Error",
@@ -6529,10 +6549,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 									if not Success then
 										ElementInstance.Header.Text = "Callback Error"
-										warn(
+										KQ(
 											`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`
 										)
-										print(Response)
+										KQ(Response)
 										if WindowSettings.NotifyOnCallbackError then
 											Starlight:Notification({
 												Title = Element.Values.Name .. " Callback Error",
@@ -6571,10 +6591,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 									if not Success then
 										ElementInstance.Header.Text = "Callback Error"
-										warn(
+										KQ(
 											`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`
 										)
-										print(Response)
+										KQ(Response)
 										if WindowSettings.NotifyOnCallbackError then
 											Starlight:Notification({
 												Title = Element.Values.Name .. " Callback Error",
@@ -6634,8 +6654,8 @@ function Starlight:CreateWindow(WindowSettings)
 								for _, ElementInstance in pairs(Instances) do
 									ElementInstance.Header.Text = "Callback Error"
 								end
-								warn(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
-								print(Response)
+								KQ(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
+								KQ(Response)
 								if WindowSettings.NotifyOnCallbackError then
 									Starlight:Notification({
 										Title = Element.Values.Name .. " Callback Error",
@@ -6900,8 +6920,8 @@ function Starlight:CreateWindow(WindowSettings)
 
 								if not Success then
 									Element.Instance.Header.Text = "Callback Error"
-									warn(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
-									print(Response)
+									KQ(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
+									KQ(Response)
 									if WindowSettings.NotifyOnCallbackError then
 										Starlight:Notification({
 											Title = Element.Values.Name .. " Callback Error",
@@ -7017,10 +7037,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 										if not Success then
 											Element.Instance.Header.Text = "Callback Error"
-											warn(
+											KQ(
 												`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`
 											)
-											print(Response)
+											KQ(Response)
 											if WindowSettings.NotifyOnCallbackError then
 												Starlight:Notification({
 													Title = Element.Values.Name .. " Callback Error",
@@ -7320,8 +7340,8 @@ function Starlight:CreateWindow(WindowSettings)
 
 								if not Success then
 									Element.Instance.Header.Text = "Callback Error"
-									warn(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
-									print(Response)
+									KQ(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
+									KQ(Response)
 									if WindowSettings.NotifyOnCallbackError then
 										Starlight:Notification({
 											Title = Element.Values.Name .. " Callback Error",
@@ -7391,8 +7411,8 @@ function Starlight:CreateWindow(WindowSettings)
 
 								if not Success then
 									Element.Instance.Header.Text = "Callback Error"
-									warn(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
-									print(Response)
+									KQ(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
+									KQ(Response)
 									if WindowSettings.NotifyOnCallbackError then
 										Starlight:Notification({
 											Title = Element.Values.Name .. " Callback Error",
@@ -7511,8 +7531,8 @@ function Starlight:CreateWindow(WindowSettings)
 
 							if not Success then
 								Element.Instance.Header.Text = "Callback Error"
-								warn(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
-								print(Response)
+								KQ(`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index})`)
+								KQ(Response)
 								if WindowSettings.NotifyOnCallbackError then
 									Starlight:Notification({
 										Title = Element.Values.Name .. " Callback Error",
@@ -7809,10 +7829,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 												if not Success then
 													Parent.Instance.Header.Text = "Callback Error"
-													warn(
+													KQ(
 														`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 													)
-													print(Response)
+													KQ(Response)
 													if WindowSettings.NotifyOnCallbackError then
 														Starlight:Notification({
 															Title = Element.Values.Name .. " Callback Error",
@@ -7840,10 +7860,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 												if not Success then
 													Parent.Instance.Header.Text = "Callback Error"
-													warn(
+													KQ(
 														`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 													)
-													print(Response)
+													KQ(Response)
 													if WindowSettings.NotifyOnCallbackError then
 														Starlight:Notification({
 															Title = Element.Values.Name .. " Callback Error",
@@ -7866,10 +7886,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 												if not Success then
 													Parent.Instance.Header.Text = "Callback Error"
-													warn(
+													KQ(
 														`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 													)
-													print(Response)
+													KQ(Response)
 													if WindowSettings.NotifyOnCallbackError then
 														Starlight:Notification({
 															Title = Element.Values.Name .. " Callback Error",
@@ -7899,10 +7919,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 												if not Success then
 													Parent.Instance.Header.Text = "Callback Error"
-													warn(
+													KQ(
 														`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 													)
-													print(Response)
+													KQ(Response)
 													if WindowSettings.NotifyOnCallbackError then
 														Starlight:Notification({
 															Title = Element.Values.Name .. " Callback Error",
@@ -7968,10 +7988,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 											if not success then
 												Parent.Instance.Header.Text = "Callback Error"
-												warn(
+												KQ(
 													`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 												)
-												print(response)
+												KQ(response)
 												if WindowSettings.NotifyOnCallbackError then
 													Starlight:Notification({
 														Title = Element.Values.Name .. " Callback Error",
@@ -7999,10 +8019,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 											if not success then
 												Parent.Instance.Header.Text = "Callback Error"
-												warn(
+												KQ(
 													`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 												)
-												print(response)
+												KQ(response)
 												if WindowSettings.NotifyOnCallbackError then
 													Starlight:Notification({
 														Title = Element.Values.Name .. " Callback Error",
@@ -8034,10 +8054,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 													if not success2 then
 														Parent.Instance.Header.Text = "Callback Error"
-														warn(
+														KQ(
 															`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 														)
-														print(response2)
+														KQ(response2)
 														if WindowSettings.NotifyOnCallbackError then
 															Starlight:Notification({
 																Title = Element.Values.Name .. " Callback Error",
@@ -8064,10 +8084,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 							if not Success then
 								Parent.Instance.Header.Text = "Callback Error"
-								warn(
+								KQ(
 									`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 								)
-								print(Response)
+								KQ(Response)
 								if WindowSettings.NotifyOnCallbackError then
 									Starlight:Notification({
 										Title = Element.Values.Name .. " Callback Error",
@@ -8130,10 +8150,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 								if not Success then
 									Parent.Instance.Header.Text = "Callback Error"
-									warn(
+									KQ(
 										`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 									)
-									print(Response)
+									KQ(Response)
 									if WindowSettings.NotifyOnCallbackError then
 										Starlight:Notification({
 											Title = Element.Values.Name .. " Callback Error",
@@ -8360,10 +8380,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 								if not Success then
 									Parent.Instance.Header.Text = "Callback Error"
-									warn(
+									KQ(
 										`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 									)
-									print(Response)
+									KQ(Response)
 									if WindowSettings.NotifyOnCallbackError then
 										Starlight:Notification({
 											Title = Element.Values.Name .. " Callback Error",
@@ -8725,7 +8745,7 @@ function Starlight:CreateWindow(WindowSettings)
 									end
 								)
 
-								;(__LxYOpenStep or function(_, fn) return RunService.RenderStepped:Connect(fn) end)(NestedElement.Instances[2], function()
+								;(__LxYOpenStep or function(_, fn) return RunService.RenderStepped:Connect(fn) end)(NestedElement.Instances[2], LPH_NO_VIRTUALIZE(function()
 									if mainDragging then
 										local localX = math.clamp(
 											Mouse.X
@@ -8794,7 +8814,7 @@ function Starlight:CreateWindow(WindowSettings)
 										NestedElement.Values.Transparency = 1 - t
 										updateInstances()
 									end
-								end)
+								end))
 							end
 
 							NestedElement.Instances[2].Container.Color.OldColor.MouseButton1Click:Connect(function()
@@ -9409,10 +9429,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 									if not Success then
 										Parent.Instance.Header.Text = "Callback Error"
-										warn(
+										KQ(
 											`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 										)
-										print(Response)
+										KQ(Response)
 										if WindowSettings.NotifyOnCallbackError then
 											Starlight:Notification({
 												Title = Element.Values.Name .. " Callback Error",
@@ -9441,10 +9461,10 @@ function Starlight:CreateWindow(WindowSettings)
 
 									if not Success then
 										Parent.Instance.Header.Text = "Callback Error"
-										warn(
+										KQ(
 											`Starlight Interface Suite - Callback Error | {Element.Values.Name} ({Index} {NestedIndex})`
 										)
-										print(Response)
+										KQ(Response)
 										if WindowSettings.NotifyOnCallbackError then
 											Starlight:Notification({
 												Title = Element.Values.Name .. " Callback Error",
@@ -11675,7 +11695,7 @@ if isStudio and enabled then
 										Numeric = false,
 										RemoveTextAfterFocusLost = true,
 										Callback = function(x)
-											print(x)
+											KQ(x)
 										end,
 									},
 									{
@@ -11684,7 +11704,7 @@ if isStudio and enabled then
 										MaxCharacters = 5,
 										RemoveTextOnFocus = false,
 										Callback = function(x)
-											print(x)
+											KQ(x)
 										end,
 									},
 								},
@@ -11747,7 +11767,7 @@ if isStudio and enabled then
 		Increment = 0.002,
 		Suffix = "km/h",
 		Callback = function(v)
-			print(v)
+			KQ(v)
 		end,
 	}, "sldr2")
 
@@ -11777,7 +11797,7 @@ if isStudio and enabled then
 		HoldToInteract = true,
 		Tooltip = "Hi",
 		Callback = function(v)
-			print(v)
+			KQ(v)
 		end,
 	}, "bnd")
 
@@ -11799,7 +11819,7 @@ if isStudio and enabled then
 		Style = 2,
 		SyncToggleState = true,
 		Callback = function(v)
-			print(v)
+			KQ(v)
 		end,
 	}, "bndprnt"):AddBind({
 		CurrentValue = "return",
@@ -11826,7 +11846,7 @@ if isStudio and enabled then
 		Tooltip = "Hi",
 		CurrentOption = nil,
 		Callback = function(v)
-			print(v)
+			KQ(v)
 		end,
 	}, "drpdwn")
 
@@ -11836,7 +11856,7 @@ if isStudio and enabled then
 		Tooltip = "Hi",
 		MultipleOptions = true,
 		Callback = function(v)
-			print(v)
+			KQ(v)
 		end,
 	}, "drpdwn2")
 	dropdown2:Set({
@@ -11853,7 +11873,7 @@ if isStudio and enabled then
 		Special = 1,
 		Placeholder = "Select a player!",
 		Callback = function(v)
-			print(v)
+			KQ(v)
 		end,
 	}, "drpdwn3")
 
@@ -11958,7 +11978,7 @@ function K.RagebotStyle(picked)
 end
 -- build marker: shows in the F9 console so you can tell which copy of the script is running
 K.Build = "2026-10-24 (52): Starlight autoload theme applied on load, Starlight open / close animation removed, colour picker loops only while open, Starlight fade no longer leaves pages see-through (templates skipped, fade values refreshed), Starlight acrylic glass removed, Setsuna UI removed, Starlight window fade back (fade over the open page only), Starlight builds each page on its first open (like the classic menu), Starlight embedded (no download / loadstring, acrylic glass off unless KiciaStarlightAcrylic),switching to Starlight reuses its downloaded model and compiled code, menu build times logged,no getfenv (Luau fast paths stay on), controllers required once, Target HUD writes only changes, Starlight performance pass (lazy tooltips, theme bindings in place, popups idle while closed), Starlight menu opens and closes instantly, Starlight controls linked to the settings, Starlight lag fixes, Starlight is the default UI, Solix and Sleepy styles removed, Auto Ragebot Style (KH, FW UE vs hackers), auto loadout logs every step, auto loadout retries 3 times, name / display name spoofer rewritten, FW Weapon Check (FW UE only), melee follows the knife rule, hide point stays under the instakill OOB, mouse keybinds, heavy attack cooldown override"
-warn("[Kicia Rebuild] build " .. K.Build)
+KQ("[Kicia Rebuild] build " .. K.Build)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12070,10 +12090,10 @@ function K.MakeHudDraggable(root, onDrop)
         end
         state.dragging = false
     end))
-    K.track(game:GetService("RunService").Heartbeat:Connect(function()
+    K.track(game:GetService("RunService").Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
         local want = K.MenuOpen == true
         if detector.Enabled ~= want then detector.Enabled = want end
-    end))
+    end)))
     return state
 end
 
@@ -12210,6 +12230,7 @@ function K.onUnload(f)
     K.cleanups[#K.cleanups + 1] = f
 end
 
+K.Mark("pcall wrapper + diagnostics")
 --==========================================================================
 --  pcall wrapper: an error swallowed by a pcall is still recorded (once per distinct message, with a repeat
 --  counter and where the failing function was defined). The diagnostics block below writes them to
@@ -12388,7 +12409,7 @@ do
                 os.date("%H:%M:%S", tonumber(prev.beat) or 0), gap, tostring(prev.matches), tostring(prev.last),
                 tonumber(prev.peakMem) or 0, tonumber(prev.maxStall) or 0, tostring(prev.swallowed), lastActions, tail))
             prevNote = "PREVIOUS SESSION DID NOT END CLEANLY - likely cause: " .. guessCause(prev, gap)
-            warn("[Kicia Rebuild] the previous session did not end cleanly - see " .. reportPath)
+            KQ("[Kicia Rebuild] the previous session did not end cleanly - see " .. reportPath)
         end
     end
     saveState()
@@ -12401,7 +12422,7 @@ do
         tostring(K.Build), uid, tostring(game.PlaceId), tostring(game.JobId), tostring(game.PrivateServerId ~= ""),
         state.matches, executor, rbxVersion))
     K.Log("info", "previous: " .. prevNote .. (prev and prev.last ~= "" and (" | last stats: " .. tostring(prev.last)) or ""))
-    warn("[Kicia Rebuild] diagnostics log: " .. path)
+    KQ("[Kicia Rebuild] diagnostics log: " .. path)
 
     -- keep only the newest 40 session logs (and their _pcall.log files) of this account
     if lsf and dlf then
@@ -12485,7 +12506,8 @@ do
     -- (rendering off would otherwise spin the loop at 300+ fps). Everything is put back when low-load ends, or when
     -- the script unloads. Server-side logic, physics, animation and the ragebot do not depend on drawing and keep
     -- running (the effect of render-off on the ragebot is not measured yet - hence the "keep 3D" mode).
-    -- K.PerfMode is set from Settings > General > Startup > Low-Load Mode and kept in the file KICIA_PERF_MODE:
+    -- K.PerfMode is set from Settings > General > Startup > Low-Load Mode and kept per account, in the file
+    -- <K.AccountDir>/perf_mode.txt (the old shared file KICIA_PERF_MODE is no longer read):
     --   "auto"   low-load only while the Roblox window is not the active window
     --   "keep3d" same, but 3D rendering stays on (only quality and fps cap drop)
     --   "always" low-load even while the window is active (a single client that is only watched)
@@ -12497,7 +12519,7 @@ do
             if text == label then
                 K.PerfMode = key
                 local wrf = K.fn and K.fn("writefile")
-                if wrf then pcall(wrf, "KICIA_PERF_MODE", key) end
+                if wrf then pcall(wrf, K.AccountDir .. "/perf_mode.txt", key) end
                 return
             end
         end
@@ -12505,8 +12527,9 @@ do
     pcall(function()
         if K.PerfMode == nil then
             K.PerfMode = "off" -- default: off (the user turns it on in Settings > General > Startup > Low-Load Mode)
-            if isfile("KICIA_PERF_MODE") then
-                local t = string.gsub(readfile("KICIA_PERF_MODE"), "%s+", "")
+            local perfFile = K.AccountDir .. "/perf_mode.txt"
+            if isfile(perfFile) then
+                local t = string.gsub(readfile(perfFile), "%s+", "")
                 if K.PerfModes[t] ~= nil then K.PerfMode = t end
             end
         end
@@ -12585,7 +12608,7 @@ do
     function K.UIMark(name)
         K.UILast, K.UILastAt = name, os.clock()
     end
-    hook(RunService.Heartbeat, function(dt)
+    hook(RunService.Heartbeat, LPH_NO_VIRTUALIZE(function(dt)
         frames += 1
         elapsed += dt
         if dt > worstDt then worstDt = dt end
@@ -12601,7 +12624,7 @@ do
                 K.Log("stall", string.format("frame took %.2f s | %s%s", dt, statsLine and statsLine() or "", lastUI))
             end
         end
-    end)
+    end))
     local Stats = game:GetService("Stats")
     function statsLine()
         local fps = elapsed > 0 and frames / elapsed or 0
@@ -12679,6 +12702,7 @@ do
     end)
 end
 
+K.Mark("signal/trove")
 --==========================================================================
 --  Signal / Trove (Kicia's own small versions)
 --==========================================================================
@@ -12778,6 +12802,7 @@ end
 Trove.Destroy = Trove.Clean
 K.Trove = Trove
 
+K.Mark("constant pool")
 --==========================================================================
 --  Kicia's constant pool (v86[...]) as recovered from usage in the dump
 --==========================================================================
@@ -12791,6 +12816,7 @@ local C = {
 }
 K.C = C
 
+K.Mark("own UI/settings (lifted dump)")
 --==========================================================================
 --  Kicia's own UI, settings store and Combat menu (lifted from the dump)
 --==========================================================================
@@ -13140,6 +13166,7 @@ do
         end
         return false
     end
+    local madeDirs = {} -- folders already checked / created this run: the same prefixes were checked over and over
     function W.ensureStorageDirectories(dir)
         local isf, mkf = K.fn("isfolder"), K.fn("makefolder")
         if not (isf and mkf) or type(dir) ~= "string" then return end
@@ -13147,7 +13174,10 @@ do
             local acc
             for part in path:gmatch("[^/]+") do
                 acc = acc and (acc .. "/" .. part) or part
-                pcall(function() if not isf(acc) then mkf(acc) end end)
+                if not madeDirs[acc] then
+                    local ok = pcall(function() if not isf(acc) then mkf(acc) end end)
+                    if ok then madeDirs[acc] = true end
+                end
             end
         end
         make(dir)
@@ -13866,7 +13896,7 @@ return f.c
 end
 end
 do -- g
-local function fn35()local I;local function W(N,...)local P=I;I=nil;N(...);I=P;end;local function N(...)W(...);while true do W(coroutine.yield());end;end;local W={};W.__index=W;W.Disconnect=function(P)if not P.Connected then return;end;P.Connected=false;if P._signal._handlerListHead==P then P._signal._handlerListHead=P._next;else local a=P._signal._handlerListHead;while a and a._next~=P do a=a._next;end;if a then a._next=P._next;end;end;end;W.Destroy=W.Disconnect;setmetatable(W,{__index=function(P,P)error(("Attempt to get Connection::%s (not a valid member)"):format(tostring(P)),2);end,__newindex=function(P,P,a)error(("Attempt to set Connection::%s (not a valid member)"):format(tostring(P)),2);end});local P={};P.__index=P;P.new=function()return(setmetatable({_handlerListHead=false,_proxyHandler=nil,_yieldedThreads=nil},P));end;P.Wrap=function(a)assert(typeof(a)=="RBXScriptSignal","Argument #1 to Signal.Wrap must be a RBXScriptSignal; got "..typeof(a));local e=P.new();e._proxyHandler=a:Connect(function(...)e:Fire(...);end);return e;end;P.Is=function(a)return type(a)=="table"and getmetatable(a)==P;end;P.Connect=function(a,e)local c=setmetatable({Connected=true,_signal=a,_fn=e,_next=false},W);if a._handlerListHead then c._next=a._handlerListHead;a._handlerListHead=c;else a._handlerListHead=c;end;return c;end;P.ConnectOnce=function(W,a)return W:Once(a);end;P.Once=function(W,a)local e;local c=false;e=W:Connect(function(...)if c then return;end;c=true;e:Disconnect();a(...);end);return e;end;P.GetConnections=function(W)local a,e={},W._handlerListHead;while e do table.insert(a,e);e=e._next;end;return a;end;P.DisconnectAll=function(W)local a=W._handlerListHead;while a do a.Connected=false;a=a._next;end;W._handlerListHead=false;a= v102 (W,"_yieldedThreads");if a then for e in a,nil,nil do if coroutine.status(e)=="suspended"then warn(debug.traceback(e,"signal disconnected; yielded thread cancelled",2));task.cancel(e);end;end;table.clear(W._yieldedThreads);end;end;P.Fire=function(W,...)local a=W._handlerListHead;while a do if a.Connected then W=I;if not W then I=coroutine.create(N);end;task.spawn(I,a._fn,...);end;a=a._next;end;end;P.FireDeferred=function(I,...)local W=I._handlerListHead;while W do local I=W;task.defer(function(...)if I.Connected then I._fn(...);end;end,...);W=W._next;end;end;P.Wait=function(I)local W= v102 (I,"_yieldedThreads");if not W then W={}; v103 (I,"_yieldedThreads",W);end;local N=coroutine.running();W[N]=true;I:Once(function(...)W[N]=nil;if coroutine.status(N)=="suspended"then task.spawn(N,...);end;end);return coroutine.yield();end;P.Destroy=function(I)I:DisconnectAll();local W= v102 (I,"_proxyHandler");if W then W:Disconnect();end;end;return table.freeze({new=P.new,Wrap=P.Wrap,Is=P.Is});end
+local function fn35()local I;local function W(N,...)local P=I;I=nil;N(...);I=P;end;local function N(...)W(...);while true do W(coroutine.yield());end;end;local W={};W.__index=W;W.Disconnect=function(P)if not P.Connected then return;end;P.Connected=false;if P._signal._handlerListHead==P then P._signal._handlerListHead=P._next;else local a=P._signal._handlerListHead;while a and a._next~=P do a=a._next;end;if a then a._next=P._next;end;end;end;W.Destroy=W.Disconnect;setmetatable(W,{__index=function(P,P)error(("Attempt to get Connection::%s (not a valid member)"):format(tostring(P)),2);end,__newindex=function(P,P,a)error(("Attempt to set Connection::%s (not a valid member)"):format(tostring(P)),2);end});local P={};P.__index=P;P.new=function()return(setmetatable({_handlerListHead=false,_proxyHandler=nil,_yieldedThreads=nil},P));end;P.Wrap=function(a)assert(typeof(a)=="RBXScriptSignal","Argument #1 to Signal.Wrap must be a RBXScriptSignal; got "..typeof(a));local e=P.new();e._proxyHandler=a:Connect(function(...)e:Fire(...);end);return e;end;P.Is=function(a)return type(a)=="table"and getmetatable(a)==P;end;P.Connect=function(a,e)local c=setmetatable({Connected=true,_signal=a,_fn=e,_next=false},W);if a._handlerListHead then c._next=a._handlerListHead;a._handlerListHead=c;else a._handlerListHead=c;end;return c;end;P.ConnectOnce=function(W,a)return W:Once(a);end;P.Once=function(W,a)local e;local c=false;e=W:Connect(function(...)if c then return;end;c=true;e:Disconnect();a(...);end);return e;end;P.GetConnections=function(W)local a,e={},W._handlerListHead;while e do table.insert(a,e);e=e._next;end;return a;end;P.DisconnectAll=function(W)local a=W._handlerListHead;while a do a.Connected=false;a=a._next;end;W._handlerListHead=false;a= v102 (W,"_yieldedThreads");if a then for e in a,nil,nil do if coroutine.status(e)=="suspended"then KQ(debug.traceback(e,"signal disconnected; yielded thread cancelled",2));task.cancel(e);end;end;table.clear(W._yieldedThreads);end;end;P.Fire=function(W,...)local a=W._handlerListHead;while a do if a.Connected then W=I;if not W then I=coroutine.create(N);end;task.spawn(I,a._fn,...);end;a=a._next;end;end;P.FireDeferred=function(I,...)local W=I._handlerListHead;while W do local I=W;task.defer(function(...)if I.Connected then I._fn(...);end;end,...);W=W._next;end;end;P.Wait=function(I)local W= v102 (I,"_yieldedThreads");if not W then W={}; v103 (I,"_yieldedThreads",W);end;local N=coroutine.running();W[N]=true;I:Once(function(...)W[N]=nil;if coroutine.status(N)=="suspended"then task.spawn(N,...);end;end);return coroutine.yield();end;P.Destroy=function(I)I:DisconnectAll();local W= v102 (I,"_proxyHandler");if W then W:Disconnect();end;end;return table.freeze({new=P.new,Wrap=P.Wrap,Is=P.Is});end
 
 tbl17.g = function()
 local g = tbl17.cache.g
@@ -29535,7 +29565,7 @@ return ax.c
 end
 end
 do -- ay
-local function fn35()local I={__mode="k"};local function W(N)if type(N)=="function"then return true;end;if type(N)=="table"then local P=getmetatable(N);if P and type( v102 (P,"__call"))=="function"then return true;end;end;return false;end;local function N(P,a)local e={};for c,c in ipairs(a)do e[c]=c;end;return setmetatable(e,{__index=function(a,a)error(string.format("%s is not in %s!",a,P),2);end,__newindex=function()error(string.format("Creating new members in %s is not allowed!",P),2);end});end;local P;P={Kind=N("Promise.Error.Kind",{"ExecutionError","AlreadyCancelled","NotResolvedInTime","TimedOut"})};P.__index=P;P.new=function(a,e)a=a or{};return setmetatable({error=tostring(a.error)or"[This error has no error text.]",trace=a.trace,context=a.context,kind=a.kind,parent=e,createdTick=os.clock(),createdTrace=debug.traceback()},P);end;P.is=function(a)if type(a)=="table"then local e=getmetatable(a);if type(e)=="table"then return  v102 (a,"error")~=nil and type( v102 (e,"extend"))=="function";end;end;return false;end;P.isKind=function(a,e)assert(e~=nil,"Argument #2 to Promise.Error.isKind must not be nil");return P.is(a)and a.kind==e;end;P.extend=function(a,e)e=e or{};e.kind=e.kind or a.kind;return P.new(e,a);end;P.getErrorChain=function(a)local e={a};while e[#e].parent do table.insert(e,e[#e].parent);end;return e;end;P.__tostring=function(a)local e={string.format("-- Promise.Error(%s) --",a.kind or"?")};for c,c in ipairs(a:getErrorChain())do table.insert(e,table.concat({c.trace or c.error,c.context},"\10"));end;return table.concat(e,"\10");end;local function a(...)return select("#",...),{...};end;local function e(c,...)return c,select("#",...),{...};end;local function c(E)assert(E~=nil,"traceback is nil");return function(p)if type(p)=="table"then return p;end;return P.new({error=p,kind=P.Kind.ExecutionError,trace=debug.traceback(tostring(p),2),context="Promise created at:\10\10"..E});end;end;local function E(p,T,...)return e(xpcall(T,c(p),...));end;local function e(c,p,T,t)return function(...)local x,S,J=E(c,p,...);if x then T(unpack(J,1,S));else t(J[1]);end;end;end;local function c(p)return next(p)==nil;end;local p={Error=P,Status=N("Promise.Status",{"Started","Resolved","Rejected","Cancelled"}),_getTime=os.clock,_timeEvent=game:GetService("RunService").Heartbeat,_unhandledRejectionCallbacks={},prototype={}};p.__index=p.prototype;p._new=function(N,T,t)if t~=nil and not p.is(t)then error("Argument #2 to Promise.new must be a promise or nil",2);end;local x={_thread=nil,_source=N,_status=p.Status.Started,_values=nil,_valuesLength=-1,_unhandledRejection=true,_queuedResolve={},_queuedReject={},_queuedFinally={},_cancellationHook=nil,_parent=t,_consumers=setmetatable({},I)};if t and t._status==p.Status.Started then t._consumers[x]=true;end;setmetatable(x,p);local function I(...)x:_resolve(...);end;local function N(...)x:_reject(...);end;local function t(S)if S then if x._status==p.Status.Cancelled then S();else x._cancellationHook=S;end;end;return x._status==p.Status.Cancelled;end;x._thread=coroutine.create(function()local S,J,J=E(x._source,T,I,N,t);if not S then N(J[1]);end;end);task.spawn(x._thread);return x;end;p.new=function(I)return p._new(debug.traceback(nil,2),I);end;p.__tostring=function(I)return string.format("Promise(%s)",I._status);end;p.defer=function(I)local N=debug.traceback(nil,2);return(p._new(N,function(T,t,x)local S;S=p._timeEvent:Connect(function()S:Disconnect();local S,J,J=E(N,I,T,t,x);if not S then t(J[1]);end;end);end));end;p.async=p.defer;p.resolve=function(...)local I,N=a(...);return p._new(debug.traceback(nil,2),function(E)E(unpack(N,1,I));end);end;p.reject=function(...)local I,N=a(...);return p._new(debug.traceback(nil,2),function(E,E)E(unpack(N,1,I));end);end;p._try=function(I,N,...)local E,T=a(...);return p._new(I,function(I)I(N(unpack(T,1,E)));end);end;p.try=function(I,...)return p._try(debug.traceback(nil,2),I,...);end;p._all=function(I,N,E)if type(N)~="table"then error(string.format("Please pass a list of promises to %s","Promise.all"),3);end;for T,t in pairs(N)do if not p.is(t)then error(string.format("Non-promise value passed into %s at index %s","Promise.all",tostring(T)),3);end;end;if#N==0 or E==0 then return p.resolve({});end;return p._new(I,function(I,T,t)local x,S,J,B,X={},{},0,0,false;local function H()for k,k in ipairs(S)do k:cancel();end;end;local function k(D,...)if X then return;end;J+=1;if E==nil then x[D]=...;else x[J]=...;end;if J>=(E or#N)then X=true;I(x);H();end;end;t(H);for I,t in ipairs(N)do S[I]=t:andThen(function(...)k(I,...);end,function(...)B+=1;if E==nil or#N-B<E then H();X=true;T(...);end;end);end;if X then H();end;end);end;p.all=function(I)return p._all(debug.traceback(nil,2),I);end;p.fold=function(I,N,E)assert(type(I)=="table","Bad argument #1 to Promise.fold: must be a table");assert(W(N),"Bad argument #2 to Promise.fold: must be a function");local T=p.resolve(E);return p.each(I,function(I,E)T=T:andThen(function(t)return N(t,I,E);end);end):andThen(function()return T;end);end;p.some=function(I,N)assert(type(N)=="number","Bad argument #2 to Promise.some: must be a number");return p._all(debug.traceback(nil,2),I,N);end;p.any=function(I)return p._all(debug.traceback(nil,2),I,1):andThen(function(I)return I[1];end);end;p.allSettled=function(I)if type(I)~="table"then error(string.format("Please pass a list of promises to %s","Promise.allSettled"),2);end;for N,E in pairs(I)do if not p.is(E)then error(string.format("Non-promise value passed into %s at index %s","Promise.allSettled",tostring(N)),2);end;end;if#I==0 then return p.resolve({});end;return p._new(debug.traceback(nil,2),function(N,E,E)local T,t,x={},{},0;local function S(J,...)x+=1;T[J]=...;if x>=#I then N(T);end;end;E(function()for N,N in ipairs(t)do N:cancel();end;end);for N,E in ipairs(I)do t[N]=E:finally(function(...)S(N,...);end);end;end);end;p.race=function(I)assert(type(I)=="table",string.format("Please pass a list of promises to %s","Promise.race"));for N,E in pairs(I)do assert(p.is(E),string.format("Non-promise value passed into %s at index %s","Promise.race",tostring(N)));end;return p._new(debug.traceback(nil,2),function(N,E,T)local t,x={},false;local function S()for J,J in ipairs(t)do J:cancel();end;end;local function J(B)return function(...)S();x=true;return B(...);end;end;if T((J(E)))then return;end;for T,B in ipairs(I)do t[T]=B:andThen(J(N),(J(E)));end;if x then S();end;end);end;p.each=function(I,N)assert(type(I)=="table",string.format("Please pass a list of promises to %s","Promise.each"));assert(W(N),string.format("Please pass a handler function to %s!","Promise.each"));return p._new(debug.traceback(nil,2),function(E,T,t)local x,S,J={},{},false;local function B()for X,X in ipairs(S)do X:cancel();end;end;t(function()J=true;B();end);t={};for X,H in ipairs(I)do if p.is(H)then if H:getStatus()==p.Status.Cancelled then B();return T(P.new({error="Promise is cancelled",kind=P.Kind.AlreadyCancelled,context=string.format("The Promise that was part of the array at index %d passed into Promise.each was already cancelled when Promise.each began.\10\10That Promise was created at:\10\10%s",X,H._source)}));elseif H:getStatus()==p.Status.Rejected then B();return T(select(2,H:await()));end;local I=H:andThen(function(...)return...;end);table.insert(S,I);t[X]=I;else t[X]=H;end;end;for I,X in ipairs(t)do if p.is(X)then local t;t,X=X:await();if not t then B();return T(X);end;end;if J then return;end;local t=p.resolve(N(X,I));table.insert(S,t);local N,S=t:await();if not N then B();return T(S);end;x[I]=S;end;E(x);end);end;p.is=function(I)if type(I)~="table"then return false;end;local N=getmetatable(I);if N==p then return true;elseif N==nil then return W(I.andThen);elseif type(N)=="table"and type( v102 (N,"__index"))=="table"and(W( v102 ( v102 (N,"__index"),"andThen")))then return true;end;return false;end;p.promisify=function(l)return function(...)return p._try(debug.traceback(nil,2),l,...);end;end;do local l,I;p.delay=function(N)assert(type(N)=="number","Bad argument #1 to Promise.delay, must be a number.");if not(N>=0.016666666666666666)or N==math.huge then N=0.016666666666666666;end;return p._new(debug.traceback(nil,2),function(E,T,t)T=p._getTime();local x=T+N;local N={resolve=E,startTime=T,endTime=x};if I==nil then l=N;I=p._timeEvent:Connect(function()local S=p._getTime();while l~=nil and l.endTime<S do local S=l;local J=S;l=S.next;if l==nil then I:Disconnect();I=nil;else l.previous=nil;end;J.resolve(p._getTime()-J.startTime);end;end);elseif l.endTime<x then T=l;E=T.next;while E~=nil and E.endTime<x do E,T=E.next,E;end;T.next=N;N.previous=T;if E~=nil then N.next=E;E.previous=N;end;else N.next=l;l.previous=N;l=N;end;t(function()local E=N.next;if l==N then if E==nil then I:Disconnect();I=nil;else E.previous=nil;end;l=E;else local l=N.previous;l.next=E;if E~=nil then E.previous=l;end;end;end);end);end;end;p.prototype.timeout=function(l,I,N)local E=debug.traceback(nil,2);return p.race({p.delay(I):andThen(function()return p.reject(N==nil and(P.new({kind=P.Kind.TimedOut,error="Timed out",context=string.format("Timeout of %d seconds exceeded.\10:timeout() called at:\10\10%s",I,E)}))or N);end),l});end;p.prototype.getStatus=function(l)return l._status;end;p.prototype._andThen=function(l,I,N,E)l._unhandledRejection=false;if l._status==p.Status.Cancelled then local T=p.new(function()end);T:cancel();return T;end;return p._new(I,function(T,t,x)local S=T;if N then S=e(I,N,T,t);end;local N=t;if E then N=e(I,E,T,t);end;if l._status==p.Status.Started then table.insert(l._queuedResolve,S);table.insert(l._queuedReject,N);x(function()if l._status==p.Status.Started then table.remove(l._queuedResolve,table.find(l._queuedResolve,S));table.remove(l._queuedReject,table.find(l._queuedReject,N));end;end);elseif l._status==p.Status.Resolved then S(unpack(l._values,1,l._valuesLength));elseif l._status==p.Status.Rejected then N(unpack(l._values,1,l._valuesLength));end;end,l);end;p.prototype.andThen=function(l,I,N)assert(I==nil or(W(I)),string.format("Please pass a handler function to %s!","Promise:andThen"));assert(N==nil or(W(N)),string.format("Please pass a handler function to %s!","Promise:andThen"));return l:_andThen(debug.traceback(nil,2),I,N);end;p.prototype.catch=function(l,I)assert(I==nil or(W(I)),string.format("Please pass a handler function to %s!","Promise:catch"));return l:_andThen(debug.traceback(nil,2),nil,I);end;p.prototype.tap=function(l,I)assert(W(I),string.format("Please pass a handler function to %s!","Promise:tap"));return l:_andThen(debug.traceback(nil,2),function(...)local l=I(...);if p.is(l)then local I,N=a(...);return l:andThen(function()return unpack(N,1,I);end);end;return...;end);end;p.prototype.andThenCall=function(l,I,...)assert(W(I),string.format("Please pass a handler function to %s!","Promise:andThenCall"));local N,e=a(...);return l:_andThen(debug.traceback(nil,2),function()return I(unpack(e,1,N));end);end;p.prototype.andThenReturn=function(l,...)local I,N=a(...);return l:_andThen(debug.traceback(nil,2),function()return unpack(N,1,I);end);end;p.prototype.cancel=function(l)if l._status~=p.Status.Started then return;end;l._status=p.Status.Cancelled;if l._cancellationHook then l._cancellationHook();end;coroutine.close(l._thread);if l._parent then l._parent:_consumerCancelled(l);end;for I in pairs(l._consumers)do I:cancel();end;l:_finalize();end;p.prototype._consumerCancelled=function(l,I)if l._status~=p.Status.Started then return;end;l._consumers[I]=nil;if next(l._consumers)==nil then l:cancel();end;end;p.prototype._finally=function(l,I,N)l._unhandledRejection=false;return(p._new(I,function(I,e,E)local T;E(function()l:_consumerCancelled(l);if T then T:cancel();end;end);E=if N then function(...)local t=N(...);if p.is(t)then T=t;t:finally(function(N)if N~=p.Status.Rejected then I(l);end;end):catch(function(...)e(...);end);else I(l);end;end else I;if l._status==p.Status.Started then table.insert(l._queuedFinally,E);else E(l._status);end;end));end;p.prototype.finally=function(l,I)assert(I==nil or(W(I)),string.format("Please pass a handler function to %s!","Promise:finally"));return l:_finally(debug.traceback(nil,2),I);end;p.prototype.finallyCall=function(l,I,...)assert(W(I),string.format("Please pass a handler function to %s!","Promise:finallyCall"));local N,e=a(...);return l:_finally(debug.traceback(nil,2),function()return I(unpack(e,1,N));end);end;p.prototype.finallyReturn=function(l,...)local I,N=a(...);return l:_finally(debug.traceback(nil,2),function()return unpack(N,1,I);end);end;p.prototype.awaitStatus=function(l)l._unhandledRejection=false;if l._status==p.Status.Started then local I=coroutine.running();l:finally(function()task.spawn(I);end):catch(function()end);coroutine.yield();end;if l._status==p.Status.Resolved then return l._status,unpack(l._values,1,l._valuesLength);elseif l._status==p.Status.Rejected then return l._status,unpack(l._values,1,l._valuesLength);end;return l._status;end;local function l(I,...)return I==p.Status.Resolved,...;end;p.prototype.await=function(I)return l(I:awaitStatus());end;local function l(I,...)if I~=p.Status.Resolved then error(...==nil and"Expected Promise rejected with no value."or(...),3);end;return...;end;p.prototype.expect=function(I)return l(I:awaitStatus());end;p.prototype.awaitValue=p.prototype.expect;p.prototype._unwrap=function(l)if l._status==p.Status.Started then error("Promise has not resolved or rejected.",2);end;return l._status==p.Status.Resolved,unpack(l._values,1,l._valuesLength);end;p.prototype._resolve=function(l,...)if l._status~=p.Status.Started then if p.is(...)then(...):_consumerCancelled(l);end;return;end;if p.is(...)then if select("#",...)>1 then warn((string.format("When returning a Promise from andThen, extra arguments are discarded! See:\10\10%s",l._source)));end;local I=...;local N=I:andThen(function(...)l:_resolve(...);end,function(...)local e=I._values[1];e=if I._error then(P.new({error=I._error,kind=P.Kind.ExecutionError,context="No stack trace available as this Promise originated from an older version of the Promise library (< v2)"}))else e;if P.isKind(e,P.Kind.ExecutionError)then return l:_reject(e:extend({error="This Promise was chained to a Promise that errored.",trace="",context=string.format("The Promise at:\10\10%s\10...Rejected because it was chained to the following Promise, which encountered an error:\10",l._source)}));end;l:_reject(...);end);if N._status==p.Status.Cancelled then l:cancel();elseif N._status==p.Status.Started then l._parent=N;N._consumers[l]=true;end;return;end;l._status=p.Status.Resolved;l._valuesLength,l._values=a(...);for I,I in ipairs(l._queuedResolve)do coroutine.wrap(I)(...);end;l:_finalize();end;p.prototype._reject=function(l,...)if l._status~=p.Status.Started then return;end;l._status=p.Status.Rejected;l._valuesLength,l._values=a(...);if not c(l._queuedReject)then for I,I in ipairs(l._queuedReject)do coroutine.wrap(I)(...);end;else local I=tostring(...);coroutine.wrap(function()p._timeEvent:Wait();if not l._unhandledRejection then return;end;local N=string.format("Unhandled Promise rejection:\10\10%s\10\10%s",I,l._source);for I,I in ipairs(p._unhandledRejectionCallbacks)do task.spawn(I,l,unpack(l._values,1,l._valuesLength));end;if p.TEST then return;end;warn(N);end)();end;l:_finalize();end;p.prototype._finalize=function(l)for I,I in ipairs(l._queuedFinally)do coroutine.wrap(I)(l._status);end;l._queuedFinally=nil;l._queuedReject=nil;l._queuedResolve=nil;if not p.TEST then l._parent=nil;l._consumers=nil;end;task.defer(coroutine.close,l._thread);end;p.prototype.now=function(l,I)local N=debug.traceback(nil,2);if l._status==p.Status.Resolved then return l:_andThen(N,function(...)return...;end);else return p.reject(I==nil and(P.new({kind=P.Kind.NotResolvedInTime,error="This Promise was not resolved in time for :now()",context=":now() was called at:\10\10"..N}))or I);end;end;p.retry=function(l,I,...)assert(W(l),"Parameter #1 to Promise.retry must be a function");assert(type(I)=="number","Parameter #2 to Promise.retry must be a number");local N,P={...},select("#",...);return p.resolve(l(...)):catch(function(...)if I>0 then return p.retry(l,I-1,unpack(N,1,P));else return p.reject(...);end;end);end;p.retryWithDelay=function(l,I,N,...)assert(W(l),"Parameter #1 to Promise.retry must be a function");assert(type(I)=="number","Parameter #2 (times) to Promise.retry must be a number");assert(type(N)=="number","Parameter #3 (seconds) to Promise.retry must be a number");local W,P={...},select("#",...);return p.resolve(l(...)):catch(function(...)if I>0 then p.delay(N):await();return p.retryWithDelay(l,I-1,N,unpack(W,1,P));else return p.reject(...);end;end);end;p.fromEvent=function(l,I)I=I or function()return true;end;return p._new(debug.traceback(nil,2),function(W,N,N)local P;local a=false;local function e()P:Disconnect();P=nil;end;P=l:Connect(function(...)local l=I(...);if l==true then W(...);if P then e();else a=true;end;elseif type(l)~="boolean"then error("Promise.fromEvent predicate should always return a boolean");end;end);if a and P then e();return;end;N(e);end);end;p.onUnhandledRejection=function(l)table.insert(p._unhandledRejectionCallbacks,l);return function()local I=table.find(p._unhandledRejectionCallbacks,l);if I then table.remove(p._unhandledRejectionCallbacks,I);end;end;end;return p;end
+local function fn35()local I={__mode="k"};local function W(N)if type(N)=="function"then return true;end;if type(N)=="table"then local P=getmetatable(N);if P and type( v102 (P,"__call"))=="function"then return true;end;end;return false;end;local function N(P,a)local e={};for c,c in ipairs(a)do e[c]=c;end;return setmetatable(e,{__index=function(a,a)error(string.format("%s is not in %s!",a,P),2);end,__newindex=function()error(string.format("Creating new members in %s is not allowed!",P),2);end});end;local P;P={Kind=N("Promise.Error.Kind",{"ExecutionError","AlreadyCancelled","NotResolvedInTime","TimedOut"})};P.__index=P;P.new=function(a,e)a=a or{};return setmetatable({error=tostring(a.error)or"[This error has no error text.]",trace=a.trace,context=a.context,kind=a.kind,parent=e,createdTick=os.clock(),createdTrace=debug.traceback()},P);end;P.is=function(a)if type(a)=="table"then local e=getmetatable(a);if type(e)=="table"then return  v102 (a,"error")~=nil and type( v102 (e,"extend"))=="function";end;end;return false;end;P.isKind=function(a,e)assert(e~=nil,"Argument #2 to Promise.Error.isKind must not be nil");return P.is(a)and a.kind==e;end;P.extend=function(a,e)e=e or{};e.kind=e.kind or a.kind;return P.new(e,a);end;P.getErrorChain=function(a)local e={a};while e[#e].parent do table.insert(e,e[#e].parent);end;return e;end;P.__tostring=function(a)local e={string.format("-- Promise.Error(%s) --",a.kind or"?")};for c,c in ipairs(a:getErrorChain())do table.insert(e,table.concat({c.trace or c.error,c.context},"\10"));end;return table.concat(e,"\10");end;local function a(...)return select("#",...),{...};end;local function e(c,...)return c,select("#",...),{...};end;local function c(E)assert(E~=nil,"traceback is nil");return function(p)if type(p)=="table"then return p;end;return P.new({error=p,kind=P.Kind.ExecutionError,trace=debug.traceback(tostring(p),2),context="Promise created at:\10\10"..E});end;end;local function E(p,T,...)return e(xpcall(T,c(p),...));end;local function e(c,p,T,t)return function(...)local x,S,J=E(c,p,...);if x then T(unpack(J,1,S));else t(J[1]);end;end;end;local function c(p)return next(p)==nil;end;local p={Error=P,Status=N("Promise.Status",{"Started","Resolved","Rejected","Cancelled"}),_getTime=os.clock,_timeEvent=game:GetService("RunService").Heartbeat,_unhandledRejectionCallbacks={},prototype={}};p.__index=p.prototype;p._new=function(N,T,t)if t~=nil and not p.is(t)then error("Argument #2 to Promise.new must be a promise or nil",2);end;local x={_thread=nil,_source=N,_status=p.Status.Started,_values=nil,_valuesLength=-1,_unhandledRejection=true,_queuedResolve={},_queuedReject={},_queuedFinally={},_cancellationHook=nil,_parent=t,_consumers=setmetatable({},I)};if t and t._status==p.Status.Started then t._consumers[x]=true;end;setmetatable(x,p);local function I(...)x:_resolve(...);end;local function N(...)x:_reject(...);end;local function t(S)if S then if x._status==p.Status.Cancelled then S();else x._cancellationHook=S;end;end;return x._status==p.Status.Cancelled;end;x._thread=coroutine.create(function()local S,J,J=E(x._source,T,I,N,t);if not S then N(J[1]);end;end);task.spawn(x._thread);return x;end;p.new=function(I)return p._new(debug.traceback(nil,2),I);end;p.__tostring=function(I)return string.format("Promise(%s)",I._status);end;p.defer=function(I)local N=debug.traceback(nil,2);return(p._new(N,function(T,t,x)local S;S=p._timeEvent:Connect(function()S:Disconnect();local S,J,J=E(N,I,T,t,x);if not S then t(J[1]);end;end);end));end;p.async=p.defer;p.resolve=function(...)local I,N=a(...);return p._new(debug.traceback(nil,2),function(E)E(unpack(N,1,I));end);end;p.reject=function(...)local I,N=a(...);return p._new(debug.traceback(nil,2),function(E,E)E(unpack(N,1,I));end);end;p._try=function(I,N,...)local E,T=a(...);return p._new(I,function(I)I(N(unpack(T,1,E)));end);end;p.try=function(I,...)return p._try(debug.traceback(nil,2),I,...);end;p._all=function(I,N,E)if type(N)~="table"then error(string.format("Please pass a list of promises to %s","Promise.all"),3);end;for T,t in pairs(N)do if not p.is(t)then error(string.format("Non-promise value passed into %s at index %s","Promise.all",tostring(T)),3);end;end;if#N==0 or E==0 then return p.resolve({});end;return p._new(I,function(I,T,t)local x,S,J,B,X={},{},0,0,false;local function H()for k,k in ipairs(S)do k:cancel();end;end;local function k(D,...)if X then return;end;J+=1;if E==nil then x[D]=...;else x[J]=...;end;if J>=(E or#N)then X=true;I(x);H();end;end;t(H);for I,t in ipairs(N)do S[I]=t:andThen(function(...)k(I,...);end,function(...)B+=1;if E==nil or#N-B<E then H();X=true;T(...);end;end);end;if X then H();end;end);end;p.all=function(I)return p._all(debug.traceback(nil,2),I);end;p.fold=function(I,N,E)assert(type(I)=="table","Bad argument #1 to Promise.fold: must be a table");assert(W(N),"Bad argument #2 to Promise.fold: must be a function");local T=p.resolve(E);return p.each(I,function(I,E)T=T:andThen(function(t)return N(t,I,E);end);end):andThen(function()return T;end);end;p.some=function(I,N)assert(type(N)=="number","Bad argument #2 to Promise.some: must be a number");return p._all(debug.traceback(nil,2),I,N);end;p.any=function(I)return p._all(debug.traceback(nil,2),I,1):andThen(function(I)return I[1];end);end;p.allSettled=function(I)if type(I)~="table"then error(string.format("Please pass a list of promises to %s","Promise.allSettled"),2);end;for N,E in pairs(I)do if not p.is(E)then error(string.format("Non-promise value passed into %s at index %s","Promise.allSettled",tostring(N)),2);end;end;if#I==0 then return p.resolve({});end;return p._new(debug.traceback(nil,2),function(N,E,E)local T,t,x={},{},0;local function S(J,...)x+=1;T[J]=...;if x>=#I then N(T);end;end;E(function()for N,N in ipairs(t)do N:cancel();end;end);for N,E in ipairs(I)do t[N]=E:finally(function(...)S(N,...);end);end;end);end;p.race=function(I)assert(type(I)=="table",string.format("Please pass a list of promises to %s","Promise.race"));for N,E in pairs(I)do assert(p.is(E),string.format("Non-promise value passed into %s at index %s","Promise.race",tostring(N)));end;return p._new(debug.traceback(nil,2),function(N,E,T)local t,x={},false;local function S()for J,J in ipairs(t)do J:cancel();end;end;local function J(B)return function(...)S();x=true;return B(...);end;end;if T((J(E)))then return;end;for T,B in ipairs(I)do t[T]=B:andThen(J(N),(J(E)));end;if x then S();end;end);end;p.each=function(I,N)assert(type(I)=="table",string.format("Please pass a list of promises to %s","Promise.each"));assert(W(N),string.format("Please pass a handler function to %s!","Promise.each"));return p._new(debug.traceback(nil,2),function(E,T,t)local x,S,J={},{},false;local function B()for X,X in ipairs(S)do X:cancel();end;end;t(function()J=true;B();end);t={};for X,H in ipairs(I)do if p.is(H)then if H:getStatus()==p.Status.Cancelled then B();return T(P.new({error="Promise is cancelled",kind=P.Kind.AlreadyCancelled,context=string.format("The Promise that was part of the array at index %d passed into Promise.each was already cancelled when Promise.each began.\10\10That Promise was created at:\10\10%s",X,H._source)}));elseif H:getStatus()==p.Status.Rejected then B();return T(select(2,H:await()));end;local I=H:andThen(function(...)return...;end);table.insert(S,I);t[X]=I;else t[X]=H;end;end;for I,X in ipairs(t)do if p.is(X)then local t;t,X=X:await();if not t then B();return T(X);end;end;if J then return;end;local t=p.resolve(N(X,I));table.insert(S,t);local N,S=t:await();if not N then B();return T(S);end;x[I]=S;end;E(x);end);end;p.is=function(I)if type(I)~="table"then return false;end;local N=getmetatable(I);if N==p then return true;elseif N==nil then return W(I.andThen);elseif type(N)=="table"and type( v102 (N,"__index"))=="table"and(W( v102 ( v102 (N,"__index"),"andThen")))then return true;end;return false;end;p.promisify=function(l)return function(...)return p._try(debug.traceback(nil,2),l,...);end;end;do local l,I;p.delay=function(N)assert(type(N)=="number","Bad argument #1 to Promise.delay, must be a number.");if not(N>=0.016666666666666666)or N==math.huge then N=0.016666666666666666;end;return p._new(debug.traceback(nil,2),function(E,T,t)T=p._getTime();local x=T+N;local N={resolve=E,startTime=T,endTime=x};if I==nil then l=N;I=p._timeEvent:Connect(function()local S=p._getTime();while l~=nil and l.endTime<S do local S=l;local J=S;l=S.next;if l==nil then I:Disconnect();I=nil;else l.previous=nil;end;J.resolve(p._getTime()-J.startTime);end;end);elseif l.endTime<x then T=l;E=T.next;while E~=nil and E.endTime<x do E,T=E.next,E;end;T.next=N;N.previous=T;if E~=nil then N.next=E;E.previous=N;end;else N.next=l;l.previous=N;l=N;end;t(function()local E=N.next;if l==N then if E==nil then I:Disconnect();I=nil;else E.previous=nil;end;l=E;else local l=N.previous;l.next=E;if E~=nil then E.previous=l;end;end;end);end);end;end;p.prototype.timeout=function(l,I,N)local E=debug.traceback(nil,2);return p.race({p.delay(I):andThen(function()return p.reject(N==nil and(P.new({kind=P.Kind.TimedOut,error="Timed out",context=string.format("Timeout of %d seconds exceeded.\10:timeout() called at:\10\10%s",I,E)}))or N);end),l});end;p.prototype.getStatus=function(l)return l._status;end;p.prototype._andThen=function(l,I,N,E)l._unhandledRejection=false;if l._status==p.Status.Cancelled then local T=p.new(function()end);T:cancel();return T;end;return p._new(I,function(T,t,x)local S=T;if N then S=e(I,N,T,t);end;local N=t;if E then N=e(I,E,T,t);end;if l._status==p.Status.Started then table.insert(l._queuedResolve,S);table.insert(l._queuedReject,N);x(function()if l._status==p.Status.Started then table.remove(l._queuedResolve,table.find(l._queuedResolve,S));table.remove(l._queuedReject,table.find(l._queuedReject,N));end;end);elseif l._status==p.Status.Resolved then S(unpack(l._values,1,l._valuesLength));elseif l._status==p.Status.Rejected then N(unpack(l._values,1,l._valuesLength));end;end,l);end;p.prototype.andThen=function(l,I,N)assert(I==nil or(W(I)),string.format("Please pass a handler function to %s!","Promise:andThen"));assert(N==nil or(W(N)),string.format("Please pass a handler function to %s!","Promise:andThen"));return l:_andThen(debug.traceback(nil,2),I,N);end;p.prototype.catch=function(l,I)assert(I==nil or(W(I)),string.format("Please pass a handler function to %s!","Promise:catch"));return l:_andThen(debug.traceback(nil,2),nil,I);end;p.prototype.tap=function(l,I)assert(W(I),string.format("Please pass a handler function to %s!","Promise:tap"));return l:_andThen(debug.traceback(nil,2),function(...)local l=I(...);if p.is(l)then local I,N=a(...);return l:andThen(function()return unpack(N,1,I);end);end;return...;end);end;p.prototype.andThenCall=function(l,I,...)assert(W(I),string.format("Please pass a handler function to %s!","Promise:andThenCall"));local N,e=a(...);return l:_andThen(debug.traceback(nil,2),function()return I(unpack(e,1,N));end);end;p.prototype.andThenReturn=function(l,...)local I,N=a(...);return l:_andThen(debug.traceback(nil,2),function()return unpack(N,1,I);end);end;p.prototype.cancel=function(l)if l._status~=p.Status.Started then return;end;l._status=p.Status.Cancelled;if l._cancellationHook then l._cancellationHook();end;coroutine.close(l._thread);if l._parent then l._parent:_consumerCancelled(l);end;for I in pairs(l._consumers)do I:cancel();end;l:_finalize();end;p.prototype._consumerCancelled=function(l,I)if l._status~=p.Status.Started then return;end;l._consumers[I]=nil;if next(l._consumers)==nil then l:cancel();end;end;p.prototype._finally=function(l,I,N)l._unhandledRejection=false;return(p._new(I,function(I,e,E)local T;E(function()l:_consumerCancelled(l);if T then T:cancel();end;end);E=if N then function(...)local t=N(...);if p.is(t)then T=t;t:finally(function(N)if N~=p.Status.Rejected then I(l);end;end):catch(function(...)e(...);end);else I(l);end;end else I;if l._status==p.Status.Started then table.insert(l._queuedFinally,E);else E(l._status);end;end));end;p.prototype.finally=function(l,I)assert(I==nil or(W(I)),string.format("Please pass a handler function to %s!","Promise:finally"));return l:_finally(debug.traceback(nil,2),I);end;p.prototype.finallyCall=function(l,I,...)assert(W(I),string.format("Please pass a handler function to %s!","Promise:finallyCall"));local N,e=a(...);return l:_finally(debug.traceback(nil,2),function()return I(unpack(e,1,N));end);end;p.prototype.finallyReturn=function(l,...)local I,N=a(...);return l:_finally(debug.traceback(nil,2),function()return unpack(N,1,I);end);end;p.prototype.awaitStatus=function(l)l._unhandledRejection=false;if l._status==p.Status.Started then local I=coroutine.running();l:finally(function()task.spawn(I);end):catch(function()end);coroutine.yield();end;if l._status==p.Status.Resolved then return l._status,unpack(l._values,1,l._valuesLength);elseif l._status==p.Status.Rejected then return l._status,unpack(l._values,1,l._valuesLength);end;return l._status;end;local function l(I,...)return I==p.Status.Resolved,...;end;p.prototype.await=function(I)return l(I:awaitStatus());end;local function l(I,...)if I~=p.Status.Resolved then error(...==nil and"Expected Promise rejected with no value."or(...),3);end;return...;end;p.prototype.expect=function(I)return l(I:awaitStatus());end;p.prototype.awaitValue=p.prototype.expect;p.prototype._unwrap=function(l)if l._status==p.Status.Started then error("Promise has not resolved or rejected.",2);end;return l._status==p.Status.Resolved,unpack(l._values,1,l._valuesLength);end;p.prototype._resolve=function(l,...)if l._status~=p.Status.Started then if p.is(...)then(...):_consumerCancelled(l);end;return;end;if p.is(...)then if select("#",...)>1 then KQ((string.format("When returning a Promise from andThen, extra arguments are discarded! See:\10\10%s",l._source)));end;local I=...;local N=I:andThen(function(...)l:_resolve(...);end,function(...)local e=I._values[1];e=if I._error then(P.new({error=I._error,kind=P.Kind.ExecutionError,context="No stack trace available as this Promise originated from an older version of the Promise library (< v2)"}))else e;if P.isKind(e,P.Kind.ExecutionError)then return l:_reject(e:extend({error="This Promise was chained to a Promise that errored.",trace="",context=string.format("The Promise at:\10\10%s\10...Rejected because it was chained to the following Promise, which encountered an error:\10",l._source)}));end;l:_reject(...);end);if N._status==p.Status.Cancelled then l:cancel();elseif N._status==p.Status.Started then l._parent=N;N._consumers[l]=true;end;return;end;l._status=p.Status.Resolved;l._valuesLength,l._values=a(...);for I,I in ipairs(l._queuedResolve)do coroutine.wrap(I)(...);end;l:_finalize();end;p.prototype._reject=function(l,...)if l._status~=p.Status.Started then return;end;l._status=p.Status.Rejected;l._valuesLength,l._values=a(...);if not c(l._queuedReject)then for I,I in ipairs(l._queuedReject)do coroutine.wrap(I)(...);end;else local I=tostring(...);coroutine.wrap(function()p._timeEvent:Wait();if not l._unhandledRejection then return;end;local N=string.format("Unhandled Promise rejection:\10\10%s\10\10%s",I,l._source);for I,I in ipairs(p._unhandledRejectionCallbacks)do task.spawn(I,l,unpack(l._values,1,l._valuesLength));end;if p.TEST then return;end;KQ(N);end)();end;l:_finalize();end;p.prototype._finalize=function(l)for I,I in ipairs(l._queuedFinally)do coroutine.wrap(I)(l._status);end;l._queuedFinally=nil;l._queuedReject=nil;l._queuedResolve=nil;if not p.TEST then l._parent=nil;l._consumers=nil;end;task.defer(coroutine.close,l._thread);end;p.prototype.now=function(l,I)local N=debug.traceback(nil,2);if l._status==p.Status.Resolved then return l:_andThen(N,function(...)return...;end);else return p.reject(I==nil and(P.new({kind=P.Kind.NotResolvedInTime,error="This Promise was not resolved in time for :now()",context=":now() was called at:\10\10"..N}))or I);end;end;p.retry=function(l,I,...)assert(W(l),"Parameter #1 to Promise.retry must be a function");assert(type(I)=="number","Parameter #2 to Promise.retry must be a number");local N,P={...},select("#",...);return p.resolve(l(...)):catch(function(...)if I>0 then return p.retry(l,I-1,unpack(N,1,P));else return p.reject(...);end;end);end;p.retryWithDelay=function(l,I,N,...)assert(W(l),"Parameter #1 to Promise.retry must be a function");assert(type(I)=="number","Parameter #2 (times) to Promise.retry must be a number");assert(type(N)=="number","Parameter #3 (seconds) to Promise.retry must be a number");local W,P={...},select("#",...);return p.resolve(l(...)):catch(function(...)if I>0 then p.delay(N):await();return p.retryWithDelay(l,I-1,N,unpack(W,1,P));else return p.reject(...);end;end);end;p.fromEvent=function(l,I)I=I or function()return true;end;return p._new(debug.traceback(nil,2),function(W,N,N)local P;local a=false;local function e()P:Disconnect();P=nil;end;P=l:Connect(function(...)local l=I(...);if l==true then W(...);if P then e();else a=true;end;elseif type(l)~="boolean"then error("Promise.fromEvent predicate should always return a boolean");end;end);if a and P then e();return;end;N(e);end);end;p.onUnhandledRejection=function(l)table.insert(p._unhandledRejectionCallbacks,l);return function()local I=table.find(p._unhandledRejectionCallbacks,l);if I then table.remove(p._unhandledRejectionCallbacks,I);end;end;end;return p;end
 
 tbl17.ay = function()
 local ay = tbl17.cache.ay
@@ -30576,7 +30606,7 @@ arg:AddDropdown({
 Label = "UI Style",
 Options = { "Starlight", "Lite", "Matcha", "KH V2", "Setsuna", "Setsuna Drop", "Classic" },
 Default = K.UIMode(),
-Tooltip = "Starlight (default) is built into the script; if it fails, the classic menu is shown for that session. Classic is the script's own menu.",
+Tooltip = "Classic (default) is the script's own menu. Starlight is built into the script; if it fails, the classic menu is shown for that session.",
 OnChanged = function(mode)
 if mode ~= nil and mode ~= K.UIMode() then K.SwitchUI(mode) end
 end,
@@ -30601,7 +30631,7 @@ if stateData ~= nil then
 stateData.SilentLoad = silentLoad
 arg2:SaveState()
 end
--- UE style: the queued loader reads this marker file (isfile("LOAD_SILENTLY")) to set SILENT
+-- UE style (proto 274): the queued loader reads this marker file (isfile("LOAD_SILENTLY")) to set SILENT
 if silentLoad then
 local wrf = K.fn("writefile")
 if wrf then pcall(wrf, "LOAD_SILENTLY", "") end
@@ -31256,7 +31286,7 @@ arg._updateCallbackById[nextUpdateId] = arg2
 arg._updateCount = arg._updateCount + 1
 
 if arg._renderConnection == nil then
-arg._renderConnection = runService.RenderStepped:Connect(function(deltaTime)
+arg._renderConnection = runService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(deltaTime)
 if not arg.Visible then
 return
 end
@@ -31264,7 +31294,7 @@ end
 for _, v136 in arg._updateCallbackById, nil, nil do
 v136(deltaTime)
 end
-end)
+end))
 end
 
 return function()
@@ -31665,7 +31695,9 @@ BindInvisible = false,
 },
 SwitchDelay = v86[186],
 ReactionTime = v86[186],
-Mode = { Type = "Linear", Speed = 0.1 },
+--  Linear mode extras (read defensively where used, an older saved config simply lacks them):
+--  SmoothPct = Smoothing %, Curve = response-curve preset (Constant keeps the old fixed-step behaviour)
+Mode = { Type = "Linear", Speed = 0.1, SmoothPct = 0, Curve = "Constant" },
 }
 
 local fov = { Radius = 150 }
@@ -31759,7 +31791,7 @@ v116 = arg:WaitForChild(v115, 5)
 if v116 ~= nil then
 break
 end
-print("[Kicia] waiting for " .. arg:GetFullName() .. " -> " .. tostring(v115) .. " (" .. math.floor(os.clock() - _t0) .. "s)")
+KQ("[Kicia] waiting for " .. arg:GetFullName() .. " -> " .. tostring(v115) .. " (" .. math.floor(os.clock() - _t0) .. "s)")
 if os.clock() - _t0 > 60 then
 error("[Kicia] timed out waiting for " .. arg:GetFullName() .. " -> " .. tostring(v115) .. ". Wrong game? This script is built for Rivals.", 2)
 end
@@ -32041,7 +32073,8 @@ RandomHitboxPercentages = { Options = { Head = v86[160] }, Labels = { Head = "He
 -- Extension keys are copied straight into the built config by aV. TargetMonsters lands at
 -- Aimbot.TargetMonsters and is read by the shared aim provider dc, so it governs the aimbot and
 -- silent aim together (they each build a provider from the same module).
-Extension = { TargetMonsters = false },
+--  Priority: which enemy the aimbot picks (ClosestToCrosshair / ClosestDistance / LowestHealth)
+Extension = { TargetMonsters = false, Priority = "ClosestToCrosshair" },
 }
 
 return {
@@ -32632,7 +32665,7 @@ return bj.c
 end
 end
 do -- bk
-local function fn35() tbl17 .a9();return{ItemModifiers={NoMotion=false,NoCameraShake=false,NoCameraSway=false,NoShootAnimation=false,NoSprintAnimation=false,NoEquipAnimation=false,NoReloadAnimation=false,NoSpread=false,AimCooldown={Enabled=false,Percentage=50},Recoil={Enabled=false,Percentage=75},FireCooldown={Enabled=false,Percentage=25},AimSpeed={Enabled=false,Percentage=300},MeleeCooldown={Enabled=false,Percentage=25},HeavyAttackCooldown={Enabled=false,Percentage=25},DashCooldown={Enabled=false,Percentage=25},ExtendMeleeRange={Enabled=false,Range=10},AutomaticWeapon=false,InfiniteDoubleJumps=false,AlwaysBackstab=false,CounterStab={Enabled=false,Range=12},GrenadeFuse={Enabled=false,ExplodeOn="Impact",RemoveFuse=false}},BulletTracers={Enabled=false,Color=Color3.fromRGB(120,220,255),Width=0.06,Lifetime=0.6,FadeTime=0.35,Style="Beam",TextureLength=4,TextureSpeed=1,Emission=1,Glow=1,Expand=true,ExpandSpeed=18,ExpandDamper=0.7},ViewModelOffset={Enabled=false,X=0,Y=0,Z=0,Pitch=0,Yaw=0,Roll=0},Chams={Character={Enabled=false,Material="Ghost",Color=Color3.fromRGB(255,255,255),Transparency=0,StripTextures=false},Arms={Enabled=false,Material="Ghost",Color=Color3.fromRGB(255,255,255),Transparency=0,StripTextures=true},Item={Enabled=false,Material="Ghost",Color=Color3.fromRGB(255,255,255),Transparency=0,StripTextures=false}},ViewModelHighlight={Arms={Enabled=false,AlwaysOnTop=false,FillColor=Color3.fromRGB(255,255,255),FillTransparency=0.5,OutlineColor=Color3.fromRGB(255,255,255),OutlineTransparency=0},Item={Enabled=false,AlwaysOnTop=false,FillColor=Color3.fromRGB(255,255,255),FillTransparency=0.5,OutlineColor=Color3.fromRGB(255,255,255),OutlineTransparency=0}},ViewModelWireframe={Arms={Enabled=false,Color=Color3.fromRGB(255,255,255),Width=0.0025},Item={Enabled=false,Color=Color3.fromRGB(255,255,255),Width=0.0025}},PlayerHit={Enabled=false,Sound={Enabled=false,DisableGameSound=false,HeadName=nil,BodyName=nil,HeadVolume=1,HeadPitch=1,BodyVolume=1,BodyPitch=1},Notification={Enabled=false,Text="Hit %DNAME% (%NAME%) for %DMG% in %PART%"},Chams={Enabled=false,Color=Color3.fromRGB(255,0,0),Transparency=0,Duration=0.8,Material="Ghost"},HitFlash={Enabled=false,Color=Color3.fromRGB(90,170,255),Duration=1.35}},PlayerElimination={Enabled=false,Sound={Enabled=false,Name=nil,Volume=1,Pitch=1},Notification={Enabled=false,Text="Eliminated %DNAME% (%NAME%)"},Chams={Enabled=false,Color=Color3.fromRGB(255,0,0),Transparency=0,Duration=0.8,Material="Ghost"},KillFlash={Enabled=false,Color=Color3.fromRGB(90,170,255),Duration=1.35}}};end
+local function fn35() tbl17 .a9();return{ItemModifiers={NoMotion=false,NoCameraShake=false,NoCameraSway=false,NoShootAnimation=false,NoSprintAnimation=false,NoEquipAnimation=false,NoReloadAnimation=false,NoSpread=false,AimCooldown={Enabled=false,Percentage=50},Recoil={Enabled=false,Percentage=75},FireCooldown={Enabled=false,Percentage=25},AimSpeed={Enabled=false,Percentage=300},MeleeCooldown={Enabled=false,Percentage=25},HeavyAttackCooldown={Enabled=false,Percentage=25},DashCooldown={Enabled=false,Percentage=25},ExtendMeleeRange={Enabled=false,Range=10},AutomaticWeapon=false,InfiniteDoubleJumps=false,AlwaysBackstab=false,CounterStab={Enabled=false,Range=12},GrenadeFuse={Enabled=false,ExplodeOn="Impact",RemoveFuse=false}},BulletTracers={Enabled=false,Color=Color3.fromRGB(120,220,255),Width=0.06,Lifetime=0.6,FadeTime=0.35,Style="Beam",TextureLength=4,TextureSpeed=1,Emission=1,Glow=1,Expand=true,ExpandSpeed=18,ExpandDamper=0.7},ViewModelOffset={Enabled=false,X=0,Y=0,Z=0,Pitch=0,Yaw=0,Roll=0},Chams={Character={Enabled=false,Material="Ghost",Color=Color3.fromRGB(255,255,255),Transparency=0,StripTextures=false},Arms={Enabled=false,Material="Ghost",Color=Color3.fromRGB(255,255,255),Transparency=0,StripTextures=true},Item={Enabled=false,Material="Ghost",Color=Color3.fromRGB(255,255,255),Transparency=0,StripTextures=false}},ViewModelHighlight={Arms={Enabled=false,AlwaysOnTop=false,FillColor=Color3.fromRGB(255,255,255),FillTransparency=0.5,OutlineColor=Color3.fromRGB(255,255,255),OutlineTransparency=0},Item={Enabled=false,AlwaysOnTop=false,FillColor=Color3.fromRGB(255,255,255),FillTransparency=0.5,OutlineColor=Color3.fromRGB(255,255,255),OutlineTransparency=0}},ViewModelWireframe={Arms={Enabled=false,Color=Color3.fromRGB(255,255,255),Width=0.0025},Item={Enabled=false,Color=Color3.fromRGB(255,255,255),Width=0.0025}},PlayerHit={Enabled=false,Sound={Enabled=false,DisableGameSound=false,HeadName=nil,BodyName=nil,HeadVolume=1,HeadPitch=1,BodyVolume=1,BodyPitch=1},Notification={Enabled=false,Text="Hit %DNAME% (%NAME%) for %DMG% in %PART%"},Chams={Enabled=false,Color=Color3.fromRGB(255,0,0),Transparency=0,Duration=0.8,Material="Ghost"},HitFlash={Enabled=false,Color=Color3.fromRGB(90,170,255),Duration=1.35},DamageText={Enabled=false,Style="Phantom Forces",CycleColors=false,OriginalColors=true,Stack=false,HideGame=false,Color1=Color3.fromRGB(255,102,102),Color2=Color3.fromRGB(255,150,0),Color3=Color3.fromRGB(255,255,0)},HitEffects={Slashes=false,Explosion=false,Bubble=false,Clone=false,CloneMaterial="ForceField",CloneRemoveAccessories=false,FrontOffset=2.5}},PlayerElimination={Enabled=false,Sound={Enabled=false,Name=nil,Volume=1,Pitch=1},Notification={Enabled=false,Text="Eliminated %DNAME% (%NAME%)"},Chams={Enabled=false,Color=Color3.fromRGB(255,0,0),Transparency=0,Duration=0.8,Material="Ghost"},KillFlash={Enabled=false,Color=Color3.fromRGB(90,170,255),Duration=1.35}}};end
 
 tbl17.bk = function()
 local bk = tbl17.cache.bk
@@ -37666,11 +37699,41 @@ local n = arg2 - arg._getAimOrigin()
 arg._move(n.X, n.Y)
 end
 
-index2._Linear = function(I,W,N)local P= compute (I._getAimOrigin(),W,N*10);if P~=nil then I._move(P.X,P.Y);end;end
+--  Linear mode. cap = Speed * 10 px per frame (the original fixed step). Two optional shapers, both off by default:
+--    Curve     step is scaled by f(x), x = distance to the target / FOV radius (0 = on target, 1 = at the FOV edge)
+--    SmoothPct Smoothing %, the step is scaled by (1 - pct/100)
+--  With Curve = "Constant" and SmoothPct = 0 this is exactly the old behaviour: Unit * min(distance, cap).
+local LINEAR_CURVES = {
+Constant = nil,
+Linear = function(x) return x end,
+EaseIn = function(x) return x * x end,
+EaseOut = function(x) return 1 - (1 - x) * (1 - x) end,
+SCurve = function(x) return x * x * (3 - 2 * x) end,
+}
+index2._Linear = function(I,W,N,R)
+local origin = I._getAimOrigin()
+local delta = W - origin
+local dist = delta.Magnitude
+if dist < 1 then return end
+local mode = type(N) == "table" and N or { Speed = N }
+local cap = (tonumber(mode.Speed) or 0.1) * 10
+local curve = LINEAR_CURVES[mode.Curve]
+if curve ~= nil then
+local x = math.clamp(dist / math.max(tonumber(R) or 150, 1), 0, 1)
+--  floor: the pull never reaches zero, so the crosshair still arrives instead of stalling short of the target
+cap = cap * math.max(curve(x), 0.05)
+end
+local smooth = tonumber(mode.SmoothPct) or 0
+if smooth > 0 then
+cap = cap * math.max(1 - math.min(smooth, 100) / 100, 0.02)
+end
+local move = delta.Unit * math.min(dist, cap)
+I._move(move.X, move.Y)
+end
 index2._Ai = function(I,W,N,P)local a= compute2 (I._getAimOrigin(),W,N,P);if a~=nil then I._move(a.X,a.Y);end;end
 index2._Spring = function(l,I,W,N)local P=l._getAimOrigin();local a=l._spring:Compute(P,I,W,N);if a~=nil then l._move(a.X,a.Y);end;end
 index2._SigmaMouse = function(l,I,W)local N=l._getAimOrigin();local P=l._sigma:Compute(N,I,W);if P~=nil then l._move(P.X,P.Y);end;end
-index2.Apply = function(l,I,W,N,P)if N.Type=="Lock"then l:_Lock(I);elseif N.Type=="Linear"then l:_Linear(I,N.Speed);elseif N.Type=="AI"then if P then l:_Ai(I,W,N.Speed);else l:_Linear(I,N.Speed);end;elseif N.Type=="Spring"then l:_Spring(I,W,N.Speed);elseif N.Type=="SigmaMouse"then l:_SigmaMouse(I,W);end;end
+index2.Apply = function(l,I,W,N,P,R)if N.Type=="Lock"then l:_Lock(I);elseif N.Type=="Linear"then l:_Linear(I,N,R);elseif N.Type=="AI"then if P then l:_Ai(I,W,N.Speed);else l:_Linear(I,N.Speed);end;elseif N.Type=="Spring"then l:_Spring(I,W,N.Speed);elseif N.Type=="SigmaMouse"then l:_SigmaMouse(I,W);end;end
 return index2
 end
 
@@ -38134,9 +38197,9 @@ return tbl18
 end
 
 index2._Initialize = function(arg)
-v115:BindToRenderStep(arg._boundId, Enum.RenderPriority.First.Value, function()
+v115:BindToRenderStep(arg._boundId, Enum.RenderPriority.First.Value, LPH_NO_VIRTUALIZE(function()
 arg:_RenderStepUpdate()
-end)
+end))
 end
 
 index2.SetServerCFrame = function(arg, cframe)
@@ -38156,16 +38219,16 @@ index2.GetClientCFrame = function(arg)
 return arg._oldCFrame or arg._rootPart.CFrame
 end
 
-index2._RenderStepUpdate = function(arg)
+index2._RenderStepUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local oldCFrame = arg._oldCFrame
 
 if oldCFrame ~= nil then
 arg._rootPart.CFrame = oldCFrame
 arg._oldCFrame = nil
 end
-end
+end)
 
-index2.HeartbeatUpdate = function(arg)
+index2.HeartbeatUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local cframe = arg._cframe
 if cframe == nil then
 return
@@ -38177,7 +38240,7 @@ arg._oldCFrame = rootPart.CFrame
 end
 
 rootPart.CFrame = cframe
-end
+end)
 
 index2.Destroy = function(arg)
 arg:_RenderStepUpdate()
@@ -39643,13 +39706,13 @@ index2.FlushViewAngles = function(arg)
 arg._viewAngleDriver:Flush()
 end
 
-index2.HeartbeatUpdate = function(arg)
+index2.HeartbeatUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local rootDesync = arg._rootDesync
 if rootDesync == nil then
 return
 end
 rootDesync:HeartbeatUpdate()
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -40860,13 +40923,13 @@ end
 return v120
 end
 
-index2.HeartbeatUpdate = function(arg)
+index2.HeartbeatUpdate = LPH_NO_VIRTUALIZE(function(arg)
 local inner = arg.Inner
 
 if inner ~= nil then
 inner.CharacterController:HeartbeatUpdate()
 end
-end
+end)
 
 index2.FlushViewAngles = function(arg)
 local inner = arg.Inner
@@ -42587,6 +42650,43 @@ local aimbot = data.Aimbot
 local fov = aimbot.Fov
 local v135 = v126.new(arg2, arg, aimbot.TargetConditions, aimbot.TargetHitboxes[v129.DefaultProfile.Class], function(origin, part) return not data.Aimbot.TargetConditions.Visible or arg3:Check(origin, part, part.Parent) end)
 local v136 = v127.new(v135, v116.buildMeasure(fov.Radius, aimbot.TargetConditions.WithinFov, "Aimbot"), v132)
+--  Priority (Aimbot.Priority): which enemy wins when several are in range. The comparator receives
+--  (candidate state, its screen score, best state so far, best score) and returns true when the candidate is better.
+--  ClosestToCrosshair is the stock comparator (the screen score, lower wins); the others fall back to it on a tie.
+local function priorityRoot(state)
+local c = state.Character
+local s = c and c.State
+return s and s.RootPart
+end
+local function priorityHealth(state)
+local c = state.Character
+local s = c and c.State
+local h = s and s.Humanoid
+return h and h.Health or math.huge
+end
+local function priorityComparator(kind)
+if kind == "ClosestDistance" then
+return function(cand, score, best, bestScore)
+local cam = workspace.CurrentCamera
+local a, b = priorityRoot(cand), priorityRoot(best)
+local da = a and (a.Position - cam.CFrame.Position).Magnitude or math.huge
+local db = b and (b.Position - cam.CFrame.Position).Magnitude or math.huge
+if da == db then return score < bestScore end
+return da < db
+end
+elseif kind == "LowestHealth" then
+return function(cand, score, best, bestScore)
+local ha, hb = priorityHealth(cand), priorityHealth(best)
+if ha == hb then return score < bestScore end
+return ha < hb
+end
+end
+return v132
+end
+v136:SetTargetComparator(priorityComparator(aimbot.Priority))
+v134:Connect(v120:GetPropertyChangedSignal({ "Aimbot", "Priority" }), function(kind)
+v136:SetTargetComparator(priorityComparator(kind))
+end)
 local followTarget = fov.Circle.FollowTarget
 local speed = followTarget.Speed
 local damper = followTarget.Damper
@@ -42717,7 +42817,7 @@ end
 
 if not v117.isBlockedFor("Aimbot", 0) then
 v117.claim("Aimbot", v86[186])
-arg._aimApplier:Apply(v136 or arg._computeTargetPoint(workspace.CurrentCamera, v133(), v135), arg2, arg4.Mode, v86[34])
+arg._aimApplier:Apply(v136 or arg._computeTargetPoint(workspace.CurrentCamera, v133(), v135), arg2, arg4.Mode, v86[34], arg4.Fov.Radius)
 else
 v117.release("Aimbot")
 end
@@ -42783,7 +42883,7 @@ arg._trove:Connect(v115:GetPropertyChangedSignal({ "ItemModifiers", "CounterStab
 refreshCounterStab()
 local runService = game:GetService("RunService")
 for _, signal in { runService.PreRender, runService.PreAnimation, runService.PreSimulation, runService.PostSimulation, runService.Heartbeat } do
-arg._trove:Connect(signal, function()
+arg._trove:Connect(signal, LPH_NO_VIRTUALIZE(function()
 if not arg._counterStabOn then
 return
 end
@@ -42803,7 +42903,7 @@ if arg:_CounterStabCooling(now) then
 return
 end
 pcall(arg._CounterStab, arg, innerContext)
-end)
+end))
 end
 end
 
@@ -43106,16 +43206,16 @@ arg._track = v120
 v120:Play()
 v120:AdjustSpeed(v116.Data.AnimationPlayer.Speed)
 
-arg._loopConnection = v118.RenderStepped:Connect(function()
+arg._loopConnection = v118.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
 arg:_Update()
-end)
+end))
 
 if arg2 then
 arg._awaitingOwnership = v86[34]
 end
 end
 
-index2._Update = function(arg)
+index2._Update = LPH_NO_VIRTUALIZE(function(arg)
 local track = arg._track
 if track == nil then
 return
@@ -43138,7 +43238,7 @@ end
 end
 
 arg:_EnforceWindow(track)
-end
+end)
 
 index2._EnforceWindow = function(arg, arg2)
 local length = arg2.Length
@@ -43960,7 +44060,7 @@ end
 if n < AUTO_LOADOUT_ATTEMPTS then
 task.delay(0.4, attempt, n + 1)
 else
-warn("[Kicia Rebuild] auto loadout failed after " .. n .. " tries: " .. tostring(err))
+KQ("[Kicia Rebuild] auto loadout failed after " .. n .. " tries: " .. tostring(err))
 end
 end)
 end
@@ -45865,7 +45965,7 @@ arg._mirror = { RealMotors = tbl19, CloneMotors = tbl20, CloneRoot = humanoidRoo
 arg._cloneMotorsByName = nil
 end
 
-index2.PreRenderUpdate = function(l,I)local W=l._mirror;if W==nil then return;end;if I~=nil then W.CloneRoot.CFrame=I;end;I,l=W.RealMotors,W.CloneMotors;for N,P in I,nil,nil do W=l[N];W.C0=P.C0;W.C1=P.C1;W.Transform=P.Transform;end;end
+index2.PreRenderUpdate = LPH_NO_VIRTUALIZE(function(l,I)local W=l._mirror;if W==nil then return;end;if I~=nil then W.CloneRoot.CFrame=I;end;I,l=W.RealMotors,W.CloneMotors;for N,P in I,nil,nil do W=l[N];W.C0=P.C0;W.C1=P.C1;W.Transform=P.Transform;end;end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -46038,7 +46138,7 @@ end
 clone:SetParent(visible and workspace or nil)
 end
 
-index2.PreRenderUpdate = function(arg, arg2)
+index2.PreRenderUpdate = LPH_NO_VIRTUALIZE(function(arg, arg2)
 if not arg._visible then
 return
 end
@@ -46047,7 +46147,7 @@ if clone == nil then
 return
 end
 clone:PreRenderUpdate(arg2)
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -47137,7 +47237,7 @@ arg:_CancelPending()
 arg._activeEmote = { Entity = arg2, Origin = aliveState.RootPart.Position, QuickMeleeAt = fn36() }
 end
 
-index2.PreRender = function(arg)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg)
 local aliveState = arg._aliveState
 if aliveState == nil then
 return
@@ -47159,7 +47259,7 @@ local entity = activeEmote.Entity
 arg._pendingCancel = v115.delay(localPlayer:GetNetworkPing()):andThen(function()
 v118(v102(getmetatable(getmetatable(entity).__index).__index, "CancelEmote"), entity, nil)
 end)
-end
+end)
 
 index2._CancelPending = function(arg)
 local pendingCancel = arg._pendingCancel
@@ -48034,9 +48134,9 @@ index2.GetResolver = function(arg)
 return arg._resolver
 end
 
-index2.PreRender = function(arg)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg)
 arg._emoteCancellation:PreRender()
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -51666,7 +51766,7 @@ end
 end
 if not K.__vmHookWarned then
 K.__vmHookWarned = true
-warn("[Kicia Rebuild] skin changer: weapon ViewModel not found on the stack, weapons are left unskinned")
+KQ("[Kicia Rebuild] skin changer: weapon ViewModel not found on the stack, weapons are left unskinned")
 end
 return nil
 end
@@ -51778,7 +51878,7 @@ end
 end)
 if not okApply and not K.__vmApplyWarned then
 K.__vmApplyWarned = true
-warn("[Kicia Rebuild] skin changer: applying a skin failed: " .. tostring(errApply))
+KQ("[Kicia Rebuild] skin changer: applying a skin failed: " .. tostring(errApply))
 end
 end,
 }
@@ -52130,14 +52230,14 @@ local applied, why = skins.ApplyLive(arg2, arg3.Skin)
 if not applied then
 -- "no item" just means the gun is not in this match yet: it gets the skin when it is created.
 if not string.find(tostring(why), "no item", 1, true) and not string.find(tostring(why), "no fighter", 1, true) then
-warn(string.format("[Kicia LY] direct rebuild %s -> %s failed: %s", tostring(arg2), tostring(arg3.Skin), tostring(why)))
+KQ(string.format("[Kicia LY] direct rebuild %s -> %s failed: %s", tostring(arg2), tostring(arg3.Skin), tostring(why)))
 end
 local okReload, errReload = pcall(arg.ReloadAllWithCosmetics, arg, arg2, arg3)
 if not okReload then
-warn(string.format("[Kicia LY] Kicia reload %s -> %s failed: %s", tostring(arg2), tostring(arg3.Skin), tostring(errReload)))
+KQ(string.format("[Kicia LY] Kicia reload %s -> %s failed: %s", tostring(arg2), tostring(arg3.Skin), tostring(errReload)))
 end
 else
-warn(string.format("[Kicia LY] rebuilt %s -> %s", tostring(arg2), tostring(arg3.Skin)))
+KQ(string.format("[Kicia LY] rebuilt %s -> %s", tostring(arg2), tostring(arg3.Skin)))
 end
 skins.RefreshUI()
 return
@@ -55099,9 +55199,9 @@ index2.GetHookErrors = function(arg)
 return arg._errorReporter:GetErrors()
 end
 
-index2.PreRender = function(arg)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg)
 arg._emotes:PreRender()
-end
+end)
 
 index2.Destroy = function(arg)
 arg:SetRuntimeEnabled(false)
@@ -61881,7 +61981,7 @@ arg._color = color
 end)
 end
 
-index2.Update = function(l,I)if not l._isEnabled then local R=v115.Data.Ragebot;if not(R.EvadeWhenHacking or R.TargetOrder=="HackersFirst" or R.TargetOrder=="LegitFirst" or R.KnifeMode=="Auto")then return;end;end;for W,W in l._fighters.StateByPlayer,nil,nil do if l._notifiedStateSet[W]then continue;end;if l:_IsHacking(W,I)then l:_ClassifyHacker(W);end;end;end
+index2.Update = LPH_NO_VIRTUALIZE(function(l,I)if not l._isEnabled then local R=v115.Data.Ragebot;if not(R.EvadeWhenHacking or R.TargetOrder=="HackersFirst" or R.TargetOrder=="LegitFirst" or R.KnifeMode=="Auto")then return;end;end;for W,W in l._fighters.StateByPlayer,nil,nil do if l._notifiedStateSet[W]then continue;end;if l:_IsHacking(W,I)then l:_ClassifyHacker(W);end;end;end)
 
 index2._ClassifyHacker = function(arg, arg2)
 if not arg._playerTags:Add(arg2.Player, "Hacker") then
@@ -61946,8 +62046,7 @@ return false
 end
 local n = (arg._speedTimerByPlayer[arg2] or v86[186]) + arg3
 arg._speedTimerByPlayer[arg2] = n
--- was 0.25 s; 0.1 s is ~6 frames of sustained >200 studs/s (a one-frame teleport spike still does not count)
-return n > 0.1
+return n > 0.25
 end
 
 -- Rage cheaters desync their server position to absurd coordinates (~2^30 studs) so shots
@@ -61968,8 +62067,7 @@ return false
 end
 local n = (arg._farTimerByPlayer[arg2] or 0) + arg3
 arg._farTimerByPlayer[arg2] = n
--- was 0.25 s; nothing legit sits past 4194304 studs, so 0.05 s (~3 frames) only filters a single glitch frame
-return n > 0.05
+return n > 0.25
 end
 
 index2.Destroy = function(arg)
@@ -65376,7 +65474,7 @@ v123 = nil
 cameraType = nil
 end
 
-v120:BindToRenderStep(v122, Enum.RenderPriority.Camera.Value + v86[63], function()
+v120:BindToRenderStep(v122, Enum.RenderPriority.Camera.Value + v86[63], LPH_NO_VIRTUALIZE(function()
 local currentCamera = workspace.CurrentCamera
 
 if currentCamera ~= v123 then
@@ -65413,7 +65511,7 @@ end
 if flag19 then
 currentCamera.CFrame = cFrame
 end
-end)
+end))
 
 arg._trove:Add(function()
 v120:UnbindFromRenderStep(v122)
@@ -65988,7 +66086,7 @@ table.insert(arg._chams, v123)
 end
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 arg._killFlash:Update(arg2)
 
 for i = #arg._chams, 1, -1 do
@@ -65996,7 +66094,7 @@ if not arg._chams[i]:Step(arg2) then
 table.remove(arg._chams, i)
 end
 end
-end
+end)
 
 index2.Destroy = function(arg)
 for _, v123 in arg._chams, nil, nil do
@@ -66132,8 +66230,19 @@ tbl18:_HandleReplicate(arg4)
 end)
 
 tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", v86[44] }), function(arg4)
-tbl18:_SetEnabled(arg4)
+tbl18:_Refresh()
 end)
+tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", "DamageText", "Enabled" }), function()
+tbl18:_Refresh()
+end)
+tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", "DamageText", "HideGame" }), function()
+tbl18:_Refresh()
+end)
+for _, fxName in { "Slashes", "Explosion", "Bubble", "Clone" } do
+tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", "HitEffects", fxName }), function()
+tbl18:_Refresh()
+end)
+end
 
 tbl18._trove:Connect(v116:GetPropertyChangedSignal({ "PlayerHit", "Sound", "DisableGameSound" }), function(arg4)
 tbl18._errorReporter:ReportResult(tbl18._noGameHitsound:SetEnabled(arg4))
@@ -66172,7 +66281,7 @@ local playerHit = v116.Data.PlayerHit
 local sound = playerHit.Sound
 fn37(sound.HeadName)
 fn38(sound.BodyName)
-tbl18:_SetEnabled(playerHit.Enabled)
+tbl18:_Refresh()
 tbl18._errorReporter:ReportResult(tbl18._noGameHitsound:SetEnabled(playerHit.Sound.DisableGameSound))
 return tbl18
 end
@@ -66193,17 +66302,39 @@ end
 if arg2.ObjectId ~= inner.FighterState.ObjectId then
 return
 end
+local dtCfg = v116.Data.PlayerHit.DamageText
+if dtCfg and dtCfg.HideGame == true then
+arg2.Block = true -- the game never sees it, so its own damage number is not drawn
+end
 local args = arg2.Args
 local parent = args[1].Parent
 if parent == nil then
 return
 end
-arg:_HandleHit(args[2], args[v86[155]] == true and "Head" or "Body", parent)
+arg:_HandleHit(args[2], args[v86[155]] == true and "Head" or "Body", parent, args[1])
 end
 
-index2._HandleHit = function(arg, arg2, arg3, arg4)
+-- the binding stays on while any of: Hit Feedback, Damage Text, or Hide Game Damage Numbers needs the event
+index2._Refresh = function(arg)
+local ph = v116.Data.PlayerHit
+local dt = ph.DamageText or {}
+local fx = ph.HitEffects or {}
+arg:_SetEnabled(ph.Enabled == true or dt.Enabled == true or dt.HideGame == true or fx.Slashes == true or fx.Explosion == true or fx.Bubble == true or fx.Clone == true)
+end
+
+index2._HandleHit = function(arg, arg2, arg3, arg4, arg5)
 local playerHit = v116.Data.PlayerHit
 local sound = playerHit.Sound
+
+local damageText = playerHit.DamageText
+if damageText and damageText.Enabled then
+local shown = tonumber(fn36(arg2)) or arg2
+local okDT, errDT = pcall(function() tbl17.hDT().show(arg4, shown, arg3, arg5) end)
+if not okDT then KQ("[DamageText] " .. tostring(errDT)) end
+end
+local okFX, errFX = pcall(function() tbl17.hDT().effects(arg4, arg5) end)
+if not okFX then KQ("[HitEffects] " .. tostring(errFX)) end
+if not playerHit.Enabled then return end
 
 if sound.Enabled then
 local flag19 = arg3 == "Head"
@@ -66239,7 +66370,7 @@ table.insert(arg._chams, v124)
 end
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 arg._hitFlash:Update(arg2)
 
 for i = #arg._chams, 1, -1 do
@@ -66247,7 +66378,7 @@ if not arg._chams[i]:Step(arg2) then
 table.remove(arg._chams, i)
 end
 end
-end
+end)
 
 index2.Destroy = function(arg)
 for _, v124 in arg._chams, nil, nil do
@@ -66977,7 +67108,7 @@ if arg.OnPresetReady then
 arg.OnPresetReady()
 end
 else
-warn("[Skybox] could not download " .. arg2 .. " (needs HTTP, writefile and getcustomasset)")
+KQ("[Skybox] could not download " .. arg2 .. " (needs HTTP, writefile and getcustomasset)")
 end
 end)
 end
@@ -67296,7 +67427,7 @@ end
 table.insert(activeEffects, arg2)
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 local activeEffects = arg._activeEffects
 if #activeEffects == 0 then
 return
@@ -67322,7 +67453,7 @@ arg:_RecycleEffect(v119)
 table.remove(activeEffects, i)
 end
 end
-end
+end)
 
 index2._SpawnCircle = function(arg, arg2, color3, arg3, arg4)
 local v119 = arg:_AcquireCircle()
@@ -70004,7 +70135,7 @@ local n34 = arg.ContractFrom + v86[63] / #arg._parts * arg.FadeLength
 local maxRadius = arg.MaxRadius
 local minThicknessMultiplier = arg.MinThicknessMultiplier
 
-arg._dissipateConnection = v121.Heartbeat:Connect(function()
+arg._dissipateConnection = v121.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 local n35 = os.clock() - now2
 arg.MinThicknessMultiplier = minThicknessMultiplier + (-v86[56] - minThicknessMultiplier) * n35 / n
 
@@ -70028,7 +70159,7 @@ end
 
 arg._dissipateConnection = nil
 end
-end)
+end))
 end
 
 index2._UpdateGeometry = function(I,W,N,P,a,e,c,E)local p,T=1-I.MaxTransparency,1-I.MinTransparency;local t=I.OpacityProfileFunction(N,P,I.PulseSpeed,I.PulseLength,I.FadeLength,p,T);p=I.Thickness*a*t;t=p>0 and t or 0;local T=1-I.ContractFrom;local x=1/(E*I.FadeLength);if t>T then W.Size=Vector3.new((c-e).Magnitude,p,p);W.CFrame=CFrame.lookAt((e+c)*0.5,c)* v115 .XInverse;W.Transparency=1-t;return true;elseif t>T-x then a=(1-(t-(T-x))*E*I.FadeLength)*(N<P*I.PulseSpeed-0.5*I.PulseLength and 1 or-1);W.Size=Vector3.new((1-math.abs(a))*(c-e).Magnitude,p,p);W.CFrame=CFrame.lookAt(e+(c-e)*(math.max(0,a)+0.5*(1-math.abs(a))),c)* v115 .XInverse;W.Transparency=1-t;return true;end;W.Transparency=1;return false;end
@@ -71088,12 +71219,12 @@ end
 blurEffect.Size = blurEffect.Size + (math.clamp(fn36(cFrame, lastCameraCFrame, arg2) * motionBlur.Sensitivity, 0, motionBlur.Intensity) - blurEffect.Size) * math.min(1, arg2 * v86[149])
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 if arg._activeTrove == nil then
 return
 end
 arg:_OnPreRender(arg2)
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -71864,10 +71995,10 @@ end
 return setmetatable(tbl18, index2)
 end
 
-index2.PreRender = function(arg, arg2)
+index2.PreRender = LPH_NO_VIRTUALIZE(function(arg, arg2)
 arg._motionBlurController:PreRender(arg2)
 arg._weatherController:Update()
-end
+end)
 
 index2.Destroy = function(arg)
 arg._trove:Destroy()
@@ -72099,7 +72230,7 @@ return hw.c
 end
 end
 do -- hX
-local function fn35() tbl17 .aE();local cfg= tbl17 .bG();return function(l)local I=l:AddSection({Title="Hacker Detector",Side="left"});I:AddToggle({Label="Enabled",Config={"HackerDetector","Enabled"}});I:AddToggle({Label="Notify",Config={"HackerDetector","Notify"}});I:AddButton({Label="Test Popup",OnClick=function()local ok,popup=pcall(function()return tbl17.aB().get():Notify({{Text="Test",Accent=true},{Text=" is hacking"}},{Color=cfg.Data.HackerDetector.Color,Lifetime=5});end);if not ok then warn("[Kicia] Test Popup failed: "..tostring(popup));elseif popup==nil then warn("[Kicia] Test Popup: nothing shown - turn on the notification panel (Enabled) first");end;end});I:AddColor({Row=I:AddLabel({Label="Text Color"}).Row,Config={"HackerDetector","Color"},Animatable=true});end;end
+local function fn35() tbl17 .aE();local cfg= tbl17 .bG();return function(l)local I=l:AddSection({Title="Hacker Detector",Side="left"});I:AddToggle({Label="Enabled",Config={"HackerDetector","Enabled"}});I:AddToggle({Label="Notify",Config={"HackerDetector","Notify"}});I:AddButton({Label="Test Popup",OnClick=function()local ok,popup=pcall(function()return tbl17.aB().get():Notify({{Text="Test",Accent=true},{Text=" is hacking"}},{Color=cfg.Data.HackerDetector.Color,Lifetime=5});end);if not ok then KQ("[Kicia] Test Popup failed: "..tostring(popup));elseif popup==nil then KQ("[Kicia] Test Popup: nothing shown - turn on the notification panel (Enabled) first");end;end});I:AddColor({Row=I:AddLabel({Label="Text Color"}).Row,Config={"HackerDetector","Color"},Animatable=true});end;end
 
 tbl17.hX = function()
 local hx = tbl17.cache.hX
@@ -72141,6 +72272,7 @@ end
 return hz.c
 end
 end
+K.Mark("rivals helper")
 --==========================================================================
 --  Rivals Helper: ELO leaderboard, FPS / ping / server HUD, watchlist join alerts (+ optional Discord webhook)
 --  and streak-hunter alerts. Ported from v4pl/RivalsHelper (obfuscated.lua, restored with a decompiler).
@@ -72392,7 +72524,7 @@ local function fn35()
         task.spawn(function()
             while alive and lbToken == token do
                 local ok, err = pcall(refreshLeaderboard)
-                if not ok then warn("[RivalsHelper] leaderboard refresh error: " .. tostring(err)) end
+                if not ok then KQ("[RivalsHelper] leaderboard refresh error: " .. tostring(err)) end
                 for _ = 1, 16 do
                     if not alive or lbToken ~= token then break end
                     task.wait(0.25)
@@ -72448,7 +72580,7 @@ local function fn35()
         hud.gui.Enabled = true
         hud.server.Text = serverInfo()
         local frames, pingFrames, last = 0, 0, os.clock()
-        hudConn = RunService.RenderStepped:Connect(function()
+        hudConn = RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
             frames = frames + 1
             pingFrames = pingFrames + 1
             local now = os.clock()
@@ -72468,7 +72600,7 @@ local function fn35()
                 pingFrames = 0
                 hud.server.Text = serverInfo()
             end
-        end)
+        end))
     end
     local function stopHud()
         if hudConn then hudConn:Disconnect() hudConn = nil end
@@ -72587,6 +72719,553 @@ local c = tbl17.cache.hRH
 if not c then
 c = { c = fn35() }
 tbl17.cache.hRH = c
+end
+
+return c.c
+end
+end
+--==========================================================================
+--  Damage Text: the two hit-effect number styles of Unnamed Enhancements ("phantom forces", "fortnite damage"),
+--  restored from its decompiled protos 124/4155/4160/4161/7079/7081/8201 and hooked into Hit Feedback.
+--  Driven by Config.PlayerHit.DamageText; PlayerHit._HandleHit calls tbl17.hDT().show(...) on every hit.
+--  The Fortnite style's font (Burbank Big Condensed Black) is the OTF that UE embeds as base64.
+--==========================================================================
+--  Damage Text: the two hit-effect number styles of Unnamed Enhancements ("phantom forces", "fortnite damage"),
+--  restored from its decompiled protos 124/4155/4160/4161/7079/7081/8201 and hooked into Hit Feedback.
+--  Driven by Config.PlayerHit.DamageText; PlayerHit._HandleHit calls tbl17.hDT().show(...) on every hit.
+--  The Fortnite style's font (Burbank Big Condensed Black) is the OTF that UE embeds as base64.
+--==========================================================================
+do -- hDT
+local function fn35()
+    tbl17.aE()
+    local config = tbl17.bG()
+    local RunService = game:GetService("RunService")
+    local TweenService = game:GetService("TweenService")
+    local HttpService = game:GetService("HttpService")
+    local Workspace = game:GetService("Workspace")
+    local DT = {}
+    local live = {}     -- every popup part still alive, so unload can remove them
+
+    local function cfg(key, default)
+        local ok, v = pcall(function() return config.Data.PlayerHit.DamageText[key] end)
+        if ok and v ~= nil then return v end
+        return default
+    end
+
+    local function new(class, props, parent)
+        local i = Instance.new(class)
+        for k, v in pairs(props) do i[k] = v end
+        if parent then i.Parent = parent end
+        return i
+    end
+
+    local function colorN(n)
+        local d = {Color3.fromRGB(255, 102, 102), Color3.fromRGB(255, 150, 0), Color3.fromRGB(255, 255, 0)}
+        local c = cfg("Color" .. n, d[n])
+        if typeof(c) ~= "Color3" then c = d[n] end
+        return c
+    end
+
+    local function track(part)
+        live[part] = true
+        part.Destroying:Connect(function() live[part] = nil end)
+        return part
+    end
+
+    -- ───────────────────────────────── fonts ─────────────────────────────────
+    local BURBANK_B64 = "T1RUTwALAIAAAwAwQ0ZGIMpb/7kAAErwAAB83kdQT1OBOkhVAAExkAAAgrxHU1VCoGbdmQAA0QwAAGCCT1MvMmy5LoEAAAEgAAAAYGNtYXAedo8DAABGuAAABBZoZWFk5gwBYwAAALwAAAA2aGhlYQZ3BJIAAAD0AAAAJGhtdHi3rBYzAADH0AAACTxtYXhwAk9QAAAAARgAAAAGbmFtZVEfsp4AAAGAAABFNXBvc3T/uAAyAABK0AAAACAAAQAAAAEAAHsq5slfDzz1AAMD6AAAAADBt17iAAAAAMG3XuL/q/75A9sDxgAAAAMAAgAAAAAAAAABAAAC7v8GAAAD4P+r/1wD2wABAAAAAAAAAAAAAAAAAAACTwAAUAACTwAAAAIBnAK8AAUABAK8AooAAACMArwCigAAAd0AMgD6AAAAAAAAAAAAAAAAgAAAL0AABEoAAAAAAAAAAEhPVVMAAAAg+wQC7v8GAAAC7gD6IAAAmwAAAAAB7ALuAAAAIAADAAAAHgFuAAEAAAAAAAAASwAAAAEAAAAAAAEAFQBLAAEAAAAAAAIABQBgAAEAAAAAAAMAMABlAAEAAAAAAAQAGwCVAAEAAAAAAAUAJwCwAAEAAAAAAAYAGQDXAAEAAAAAAAcAQQDwAAEAAAAAAAgAEAExAAEAAAAAAAkACgFBAAEAAAAAAAsAHgFLAAEAAAAAAAwAGAFpAAEAAAAAAA0U4gGBAAEAAAAAAA4AJhZjAAMAAQQJAAAAlhaJAAMAAQQJAAEAIhcfAAMAAQQJAAIADhdBAAMAAQQJAAMAYBdPAAMAAQQJAAQAMhevAAMAAQQJAAUAThfhAAMAAQQJAAYAMhevAAMAAQQJAAcAghgvAAMAAQQJAAgAIBixAAMAAQQJAAkAFBjRAAMAAQQJAAsAPBjlAAMAAQQJAAwAMBkhAAMAAQQJAA0p9hlRAAMAAQQJAA4ATENHAAMAAQQJABAAKkOTAAMAAQQJABEACkO9Q29weXJpZ2h0IDIwMDYgSG91c2UgSW5kdXN0cmllcy9CcmFuZCBEZXNpZ24gQ28uLCBJbmMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuQnVyYmFuayBCaWcgQ29uZGVuc2VkQmxhY2tIb3VzZUluZHVzdHJpZXM6QnVyYmFuayBCaWcgQ29uZGVuc2VkIEJsYWNrOjIwMDZCdXJiYW5rIEJpZyBDb25kZW5zZWQgQmxhY2tWZXJzaW9uIDEuMDAwO1BTIDAwMS4wMDE7aG90Y29udiAxLjAuMzhCdXJiYW5rQmlnQ29uZGVuc2VkLUJsYWNrQnVyYmFuayBpcyBhIHRyYWRlbWFyayBvZiBIb3VzZSBJbmR1c3RyaWVzL0JyYW5kIERlc2lnbiBDby4sIEluYy5Ib3VzZSBJbmR1c3RyaWVzVGFsIExlbWluZ2h0dHA6Ly93d3cuaG91c2VpbmR1c3RyaWVzLmNvbWh0dHA6Ly93d3cudGFsbGVtaW5nLmNvbUhvdXNlIEluZHVzdHJpZXMgRm9udCBTb2Z0d2FyZSBMaWNlbnNlIEFncmVlbWVudAoKSE9VU0UgSU5EVVNUUklFUyBQUk9EVUNUUyBNQVkgTk9UIEJFIFJFVFVSTkVEIE9SIEVYQ0hBTkdFRCBBRlRFUiBUSEUgRk9OVFMgSEFWRSBCRUVOIElOU1RBTExFRC4gCgpQbGVhc2UgcmVhZCB0aGlzIGFncmVlbWVudCBjYXJlZnVsbHkhIEJ5IGluc3RhbGxpbmcgSG91c2UgSW5kdXN0cmllcyBmb250IHNvZnR3YXJlLCB5b3UgYXJlIGFncmVlaW5nIHRvIHRoZSB0ZXJtcyBvZiB0aGlzIGxpY2Vuc2UuIEhvdXNlIEluZHVzdHJpZXMgZm9udHMgYW5kIGFydHdvcmsgYXJlIGxpY2Vuc2VkIGZvciB1c2Ugb24gNiByYXN0ZXJpemluZyBkZXZpY2VzIGNvbm5lY3RlZCB0byB0aGUgc2FtZSBuZXR3b3JrLiBBIGRldmljZSBtYXkgYmUsIGJ1dCBpcyBub3QgbGltaXRlZCB0bywgYSBwcmludGVyLCByYXN0ZXJpemVyLCB2aWRlbyBkaXNwbGF5IHRlcm1pbmFsLCBDUFUsIHdvcmtzdGF0aW9uIG9yIGFueSBkZXZpY2Ugd2hlcmUgdGhlIGZvbnQgc29mdHdhcmUgaXMgcmFzdGVyaXplZCBvciBkaXNwbGF5IG9mIHRoZSBIb3VzZSBJbmR1c3RyaWVzIEZvbnQgaXMgZ2VuZXJhdGVkIGZyb20gZm9udCBzb2Z0d2FyZSBvdXRsaW5lcy4gSWYgeW91ciBjb25maWd1cmF0aW9uIGV4Y2VlZHMgdGhpcyBmb3JtYXQsIHlvdSBtdXN0IGNhbGwgSG91c2UgSW5kdXN0cmllcyBhdCAzMDItMjM0LTIzNTYgdG8gZXhwYW5kIHlvdXIgc2l0ZSBsaWNlbnNlLiBJZiB5b3UgZG8gbm90IGFncmVlIHRvIHRoZSB0ZXJtcyBvZiB0aGlzIHNvZnR3YXJlIGxpY2Vuc2UsIHBsZWFzZSByZXR1cm4gdGhlIHNvZnR3YXJlIGVudmVsb3BlIHVub3BlbmVkIHRvIEhvdXNlIEluZHVzdHJpZXMsIDExNDUgWW9ya2x5biBSb2FkLCBQb3N0IE9mZmljZSBCb3ggMTY2LCBZb3JrbHluLCBEZWxhd2FyZSwgMTk3MzYtMDE2NiwgVS5TLkEuCgoxLiBFYWNoIEhvdXNlIEluZHVzdHJpZXMgZm9udCBpcyBsaWNlbnNlZCBmb3IgdXNlIG9uIGEgbWF4aW11bSBvZiBzaXggcmFzdGVyaXppbmcgZGV2aWNlcyBjb25uZWN0ZWQgdG8gdGhlIHNhbWUgbG9jYWwgYXJlYSBuZXR3b3JrLiAKMi4gQSBtdWx0aS1kZXZpY2Ugc2l0ZSBsaWNlbnNlIHVwZ3JhZGUgbXVzdCBiZSBwdXJjaGFzZWQgZm9yIG11bHRpcGxlIGRldmljZSB1c2UgYWNjb3JkaW5nIHRvIGEgbXVsdGktZGV2aWNlIGxpY2Vuc2Ugc2NoZWR1bGUgYXZhaWxhYmxlIGF0IHd3dy5ob3VzZWluZHVzdHJpZXMuY29tL2xpY2Vuc2UuIEVhY2ggbG9jYXRpb24gYW5kL29yIGVudGl0eSBtdXN0IHB1cmNoYXNlIGEgc2VwYXJhdGUgbGljZW5zZSwgc3RhcnRpbmcgd2l0aCB0aGUgZmlyc3QgZGV2aWNlLiBBbiBvdXRwdXQgZGV2aWNlIGlzIGFueSBwcmludGVyLCBzdWNoIGFzIGEgTGlub3Ryb25pYyByYXN0ZXJpemVyLCBsYXNlciBwcmludGVyLCBvciBkb3QtbWF0cml4IHByaW50ZXIsIGFueSB2aWRlbyBkaXNwbGF5IHRlcm1pbmFsIG9yIGFueSBvdGhlciBkZXZpY2Ugd2hlcmUgZGlzcGxheSBpcyBnZW5lcmF0ZWQgZnJvbSB0aGUgZm9udCBzb2Z0d2FyZSBvdXRsaW5lcywgc3VjaCBhcyB3aXRoIHRoZSB1c2Ugb2YgQWRvYmUgVHlwZSBNYW5hZ2VyIG9yIG5hdGl2ZSBUcnVlVHlwZSByYXN0ZXJpemVyIGlmIHRoZSBmb250IGlzIHRvIGJlIHVzZWQgcHJpbWFyaWx5IGZvciBkaXNwbGF5IHRlcm1pbmFscyB0aGF0IGdlbmVyYXRlIHRoZSBvdXRwdXQsIGFzIGluIGEgbXVsdGltZWRpYSBDRC4gCjMuIEhvdXNlIEluZHVzdHJpZXMgZm9udCBzb2Z0d2FyZSBtYXkgbm90IGJlIGNvcGllZCBvciBkdXBsaWNhdGVkIGluIGFueSBmb3JtIGV4Y2VwdCBmb3IgYmFja3VwIHB1cnBvc2VzLiBIb3VzZSBJbmR1c3RyaWVzIGZvbnQgc29mdHdhcmUgb3IgZG9jdW1lbnRhdGlvbiBtYXkgbm90IGJlIHJlbnRlZCwgbGVhc2VkLCBzdWJsaWNlbnNlZCBvciBsZW50IHRvIGFub3RoZXIgcGVyc29uIG9yIGVudGl0eS4gCjQuIEhvdXNlIEluZHVzdHJpZXMgZm9udCBzb2Z0d2FyZSBtYXkgbm90IGJlIHJldHVybmVkIG9yIGV4Y2hhbmdlZCB1bmxlc3MgZGVmZWN0aXZlLiBEZWZlY3RpdmUgc29mdHdhcmUgc2hhbGwgYmUgcmVwbGFjZWQgYnkgdGhlIHNhbWUgc29mdHdhcmUgaWYgYWNjb21wYW5pZWQgd2l0aCBwdXJjaGFzZSByZWNlaXB0IGFuZCBzZWxsZXIgaXMgbm90aWZpZWQgd2l0aGluIG9uZSB3ZWVrIG9mIHB1cmNoYXNlLiAKNS4gQW55IHNvZnR3YXJlLCBFUFMgZmlsZSwgaWxsdXN0cmF0aW9uLCBvciBhbnl0aGluZyBkZXJpdmVkIGZyb20gSG91c2UgSW5kdXN0cmllcyBmb250IHNvZnR3YXJlIG11c3QgYmUgdXNlZCBhY2NvcmRpbmcgdG8gdGhlIG9yaWdpbmFsIGxpY2Vuc2luZyB0ZXJtcy4gVGhpcyBtZWFucywgZm9yIGV4YW1wbGUsIHRoYXQgYW55IG1vZGlmaWVkIEhvdXNlIEluZHVzdHJpZXMgZm9udCwgb3IgYW55IG91dGxpbmUgaW5mb3JtYXRpb24gZGVyaXZlZCBmcm9tIGFueSBIb3VzZSBJbmR1c3RyaWVzIGZvbnQgaXMgc3RpbGwgbGljZW5zZWQgZm9yIHRoZSBzYW1lIG51bWJlciBvZiBkZXZpY2VzIGFzIHRoZSBvcmlnaW5hbCBhbmQgbWF5IG5vdCBiZSBzdWJsaWNlbnNlZCwgZ2l2ZW4gYXdheSwgb3Igc29sZCB3aXRob3V0IHdyaXR0ZW4gcGVybWlzc2lvbiBmcm9tIEhvdXNlIEluZHVzdHJpZXMuIEhvdXNlIEluZHVzdHJpZXMgaXMgcmVzcG9uc2libGUgZm9yIHRlY2huaWNhbCBzdXBwb3J0IG9mIGl0cyBvZmZpY2lhbGx5IGRpc3RyaWJ1dGVkIGZvbnRzIG9ubHkuIEhvdXNlIEluZHVzdHJpZXMgaXMgbm90IHJlc3BvbnNpYmxlIGZvciBtb2RpZmllZCBhbmQvb3IgcmVnZW5lcmF0ZWQgc29mdHdhcmUuIAo2LiBUaGlzIGxpY2Vuc2UgZG9lcyBub3QgcGVybWl0IGFueSBmb3JtIG9mIGVtYmVkZGluZyBvciBlbmNyeXB0aW5nIG9mIEhvdXNlIEluZHVzdHJpZXMgZm9udCBzb2Z0d2FyZSBpbiBkaWdpdGFsIGRvY3VtZW50cyBvciBhbnkgb3RoZXIgZm9ybS4gSWYgZW1iZWRkaW5nIG9mIEhvdXNlIEluZHVzdHJpZXMgZm9udHMgaXMgZGVzaXJlZCwgdGhlIHVzZXIgbXVzdCBwdXJjaGFzZSBhbiBhZGRpdGlvbmFsIGxpY2Vuc2UgZnJvbSBIb3VzZSBJbmR1c3RyaWVzIGJhc2VkIHVwb24gdXNhZ2UuIElmIGFuIGVtYmVkZGluZyBsaWNlbnNlIGlzIGRlc2lyZWQsIGxpY2Vuc2VlIG11c3QgcmVwcmVzZW50IGFuZCB3YXJyYW50IHRoYXQgbGljZW5zZWUncyBlbmNyeXB0aW9uIG9mIHRoZSBlbWJlZGRlZCBIb3VzZSBJbmR1c3RyaWVzIGZvbnQgc29mdHdhcmUgaXMgc2VjdXJlIGVub3VnaCB0byBwcmV2ZW50IGFjY2VzcyBvciB1c2UgYnkgYW55b25lIHVzaW5nIHRoZSBzb2Z0d2FyZSBpbiB3aGljaCB0aGUgZm9udCBkYXRhIGlzIGVtYmVkZGVkLiAKNy4gVGhlIHVzZXIgb2YgdGhpcyBIb3VzZSBJbmR1c3RyaWVzIGZvbnQgc29mdHdhcmUgYWdyZWVzIHRvIGNyZWRpdCBIb3VzZSBJbmR1c3RyaWVzIGFzIHRoZSB0cmFkZW1hcmsgYW5kIGNvcHlyaWdodCBvd25lciBvZiB0aGUgSG91c2UgSW5kdXN0cmllcyBmb250cyBhbmQgbGlzdCB0aGUgZm9udCBuYW1lcywgd2hlcmV2ZXIgYW5kIHdoZW5ldmVyIGRlc2lnbiwgcHJvZHVjdGlvbiwgb3IgYW55IG90aGVyIGNyZWRpdHMgYXJlIHNob3duLiAKOC4gQW55IHZpb2xhdGlvbiBieSBsaWNlbnNlZSBvZiB0aGlzIGFncmVlbWVudCBzaGFsbCBjYXVzZSB0aGlzIGxpY2Vuc2UgdG8gYmUgdGVybWluYXRlZC4gSW4gdGhlIGV2ZW50IG9mIHRlcm1pbmF0aW9uLCBhbmQgd2l0aG91dCBsaW1pdGluZyBhbnkgb3RoZXIgcmVtZWRpZXMgd2hpY2ggbWF5IGJlIGF2YWlsYWJsZSBhZ2FpbnN0IHlvdSwgeW91IG11c3QgaW1tZWRpYXRlbHkgcmV0dXJuIHRoZSBmb250IHNvZnR3YXJlIHRvIEhvdXNlIEluZHVzdHJpZXMgYW5kIGNlcnRpZnkgdGhhdCBubyBjb3BpZXMgcmVtYWluIGluIHlvdXIgcG9zc2Vzc2lvbiBvciBleGlzdCBvbiB0aGUgb3JpZ2luYWxseSBsaWNlbnNlZCBzaXRlLiAKOS4gSG91c2UgSW5kdXN0cmllcyBtYWtlcyBubyB3YXJyYW50aWVzIGV4cHJlc3Mgb3IgaW1wbGllZCBhcyB0byBtZXJjaGFudGFiaWxpdHksIGZpdG5lc3MgZm9yIGEgcGFydGljdWxhciBwdXJwb3NlLCBvciBvdGhlcndpc2UuIFdpdGhvdXQgbGltaXRpbmcgdGhlIGFmb3JlbWVudGlvbmVkLCBIb3VzZSBJbmR1c3RyaWVzIHNoYWxsIGluIG5vIGV2ZW50IGJlIGxpYWJsZSBmb3IgYW55IGRpcmVjdCwgaW5kaXJlY3QsIGNvbnNlcXVlbnRpYWwsIG9yIGluY2lkZW50YWwgZGFtYWdlcywgaW5jbHVkaW5nIGRhbWFnZXMgZnJvbSBsb3NzIG9mIGJ1c2luZXNzIHByb2ZpdHMsIGJ1c2luZXNzIGludGVycnVwdGlvbiwgYW5kIGxvc3Mgb2YgYnVzaW5lc3MgaW5mb3JtYXRpb24sIGFyaXNpbmcgb3V0IG9mIHRoZSB1c2Ugb3IgaW5hYmlsaXR5IHRvIHVzZSB0aGUgcHJvZHVjdC4gCjEwLiBNdWx0aS1kZXZpY2UgTGljZW5zZSBVcGdyYWRlIFNjaGVkdWxlOgoKCUhvdXNlIEluZHVzdHJpZXMgc29mdHdhcmUgaXMgYXV0b21hdGljYWxseSBsaWNlbnNlZCBmb3IgdXNlIG9uIGEgbWF4aW11bSBvZiBzaXggcmFzdGVyaXppbmcgZGV2aWNlcyBjb25uZWN0ZWQgdG8gdGhlIHNhbWUgbG9jYWwgYXJlYSBuZXR3b3JrLiAgRWFjaCBsb2NhdGlvbiBhbmQvb3IgZW50aXR5IG11c3QgcHVyY2hhc2UgYSBzZXBhcmF0ZSBsaWNlbnNlLCBzdGFydGluZyB3aXRoIHRoZSBmaXJzdCBkZXZpY2UuIFRoZSB1cGdyYWRlIHByaWNlIGlzIGNhbGN1bGF0ZWQgYXMgYSBwZXJjZW50YWdlIG9mIHRoZSBvcmlnaW5hbCBwcmljZSBvZiB0aGUgc29mdHdhcmUuIFRoZSBmb2xsb3dpbmcgaXMgY3VtdWxhdGl2ZToKCgktIHVwIHRvIDEwIGRldmljZXM6IGFkZCA1MCBwZXJjZW50IG9mIG9yaWdpbmFsIHByaWNlOwoJLSAxMSB0byA1MCBkZXZpY2VzOiBhZGQgMjAgcGVyY2VudCBvZiBvcmlnaW5hbCBwcmljZSBmb3IgZWFjaCA1IGRldmljZXM7CgktIDUxIHRvIDEyNSBkZXZpY2VzOiBhZGQgMTUgcGVyY2VudCBvZiBvcmlnaW5hbCBwcmljZSBmb3IgZWFjaCA1IGRldmljZXM7CgktIDEyNiB0byAyNTAgZGV2aWNlczogYWRkIDEwIHBlcmNlbnQgb2Ygb3JpZ2luYWwgcHJpY2UgZm9yIGVhY2ggNSBkZXZpY2VzOwoJLSAyNTEgZGV2aWNlcyBhbmQgb3ZlcjogYWRkIDUgcGVyY2VudCBvZiBvcmlnaW5hbCBwcmljZSBmb3IgZWFjaCA1IGRldmljZXM7CgpJZiB5b3VyIHVzYWdlIGV4Y2VlZHMgdGhlIG51bWJlciBvZiBkZXZpY2VzIGZvciBhIGdpdmVuIG91dHB1dCBkZXZpY2UgY2F0ZWdvcnksIHlvdSBtdXN0IHB1cmNoYXNlIHRoZSB1cGdyYWRlIHdpdGggdGhlIGFwcGxpY2FibGUgbnVtYmVyIG9mIGRldmljZXMuIENhbGwgMzAyLTIzNC0yMzU2IGZvciBhIHF1b3RlLmh0dHA6Ly93d3cuaG91c2VpbmR1c3RyaWVzLmNvbS9saWNlbnNlAEMAbwBwAHkAcgBpAGcAaAB0ACAAMgAwADAANgAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMALwBCAHIAYQBuAGQAIABEAGUAcwBpAGcAbgAgAEMAbwAuACwAIABJAG4AYwAuACAAQQBsAGwAIABSAGkAZwBoAHQAcwAgAFIAZQBzAGUAcgB2AGUAZAAuAEIAdQByAGIAYQBuAGsAIABCAGkAZwAgAEMAZAAgAEIAawBSAGUAZwB1AGwAYQByAEgAbwB1AHMAZQBJAG4AZAB1AHMAdAByAGkAZQBzADoAQgB1AHIAYgBhAG4AawAgAEIAaQBnACAAQwBvAG4AZABlAG4AcwBlAGQAIABCAGwAYQBjAGsAOgAyADAAMAA2AEIAdQByAGIAYQBuAGsAQgBpAGcAQwBvAG4AZABlAG4AcwBlAGQALQBCAGwAYQBjAGsAVgBlAHIAcwBpAG8AbgAgADEALgAwADAAMAA7AFAAUwAgADAAMAAxAC4AMAAwADEAOwBoAG8AdABjAG8AbgB2ACAAMQAuADAALgAzADgAQgB1AHIAYgBhAG4AawAgAGkAcwAgAGEAIAB0AHIAYQBkAGUAbQBhAHIAawAgAG8AZgAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMALwBCAHIAYQBuAGQAIABEAGUAcwBpAGcAbgAgAEMAbwAuACwAIABJAG4AYwAuAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAVABhAGwAIABMAGUAbQBpAG4AZwBoAHQAdABwADoALwAvAHcAdwB3AC4AaABvAHUAcwBlAGkAbgBkAHUAcwB0AHIAaQBlAHMALgBjAG8AbQBoAHQAdABwADoALwAvAHcAdwB3AC4AdABhAGwAbABlAG0AaQBuAGcALgBjAG8AbQBIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAARgBvAG4AdAAgAFMAbwBmAHQAdwBhAHIAZQAgAEwAaQBjAGUAbgBzAGUAIABBAGcAcgBlAGUAbQBlAG4AdAANAAoADQAKAEgATwBVAFMARQAgAEkATgBEAFUAUwBUAFIASQBFAFMAIABQAFIATwBEAFUAQwBUAFMAIABNAEEAWQAgAE4ATwBUACAAQgBFACAAUgBFAFQAVQBSAE4ARQBEACAATwBSACAARQBYAEMASABBAE4ARwBFAEQAIABBAEYAVABFAFIAIABUAEgARQAgAEYATwBOAFQAUwAgAEgAQQBWAEUAIABCAEUARQBOACAASQBOAFMAVABBAEwATABFAEQALgAgAA0ACgANAAoAUABsAGUAYQBzAGUAIAByAGUAYQBkACAAdABoAGkAcwAgAGEAZwByAGUAZQBtAGUAbgB0ACAAYwBhAHIAZQBmAHUAbABsAHkAIQAgAEIAeQAgAGkAbgBzAHQAYQBsAGwAaQBuAGcAIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAZgBvAG4AdAAgAHMAbwBmAHQAdwBhAHIAZQAsACAAeQBvAHUAIABhAHIAZQAgAGEAZwByAGUAZQBpAG4AZwAgAHQAbwAgAHQAaABlACAAdABlAHIAbQBzACAAbwBmACAAdABoAGkAcwAgAGwAaQBjAGUAbgBzAGUALgAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABmAG8AbgB0AHMAIABhAG4AZAAgAGEAcgB0AHcAbwByAGsAIABhAHIAZQAgAGwAaQBjAGUAbgBzAGUAZAAgAGYAbwByACAAdQBzAGUAIABvAG4AIAA2ACAAcgBhAHMAdABlAHIAaQB6AGkAbgBnACAAZABlAHYAaQBjAGUAcwAgAGMAbwBuAG4AZQBjAHQAZQBkACAAdABvACAAdABoAGUAIABzAGEAbQBlACAAbgBlAHQAdwBvAHIAawAuACAAQQAgAGQAZQB2AGkAYwBlACAAbQBhAHkAIABiAGUALAAgAGIAdQB0ACAAaQBzACAAbgBvAHQAIABsAGkAbQBpAHQAZQBkACAAdABvACwAIABhACAAcAByAGkAbgB0AGUAcgAsACAAcgBhAHMAdABlAHIAaQB6AGUAcgAsACAAdgBpAGQAZQBvACAAZABpAHMAcABsAGEAeQAgAHQAZQByAG0AaQBuAGEAbAAsACAAQwBQAFUALAAgAHcAbwByAGsAcwB0AGEAdABpAG8AbgAgAG8AcgAgAGEAbgB5ACAAZABlAHYAaQBjAGUAIAB3AGgAZQByAGUAIAB0AGgAZQAgAGYAbwBuAHQAIABzAG8AZgB0AHcAYQByAGUAIABpAHMAIAByAGEAcwB0AGUAcgBpAHoAZQBkACAAbwByACAAZABpAHMAcABsAGEAeQAgAG8AZgAgAHQAaABlACAASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAEYAbwBuAHQAIABpAHMAIABnAGUAbgBlAHIAYQB0AGUAZAAgAGYAcgBvAG0AIABmAG8AbgB0ACAAcwBvAGYAdAB3AGEAcgBlACAAbwB1AHQAbABpAG4AZQBzAC4AIABJAGYAIAB5AG8AdQByACAAYwBvAG4AZgBpAGcAdQByAGEAdABpAG8AbgAgAGUAeABjAGUAZQBkAHMAIAB0AGgAaQBzACAAZgBvAHIAbQBhAHQALAAgAHkAbwB1ACAAbQB1AHMAdAAgAGMAYQBsAGwAIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAYQB0ACAAMwAwADIALQAyADMANAAtADIAMwA1ADYAIAB0AG8AIABlAHgAcABhAG4AZAAgAHkAbwB1AHIAIABzAGkAdABlACAAbABpAGMAZQBuAHMAZQAuACAASQBmACAAeQBvAHUAIABkAG8AIABuAG8AdAAgAGEAZwByAGUAZQAgAHQAbwAgAHQAaABlACAAdABlAHIAbQBzACAAbwBmACAAdABoAGkAcwAgAHMAbwBmAHQAdwBhAHIAZQAgAGwAaQBjAGUAbgBzAGUALAAgAHAAbABlAGEAcwBlACAAcgBlAHQAdQByAG4AIAB0AGgAZQAgAHMAbwBmAHQAdwBhAHIAZQAgAGUAbgB2AGUAbABvAHAAZQAgAHUAbgBvAHAAZQBuAGUAZAAgAHQAbwAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMALAAgADEAMQA0ADUAIABZAG8AcgBrAGwAeQBuACAAUgBvAGEAZAAsACAAUABvAHMAdAAgAE8AZgBmAGkAYwBlACAAQgBvAHgAIAAxADYANgAsACAAWQBvAHIAawBsAHkAbgAsACAARABlAGwAYQB3AGEAcgBlACwAIAAxADkANwAzADYALQAwADEANgA2ACwAIABVAC4AUwAuAEEALgANAAoADQAKADEALgAgAEUAYQBjAGgAIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAZgBvAG4AdAAgAGkAcwAgAGwAaQBjAGUAbgBzAGUAZAAgAGYAbwByACAAdQBzAGUAIABvAG4AIABhACAAbQBhAHgAaQBtAHUAbQAgAG8AZgAgAHMAaQB4ACAAcgBhAHMAdABlAHIAaQB6AGkAbgBnACAAZABlAHYAaQBjAGUAcwAgAGMAbwBuAG4AZQBjAHQAZQBkACAAdABvACAAdABoAGUAIABzAGEAbQBlACAAbABvAGMAYQBsACAAYQByAGUAYQAgAG4AZQB0AHcAbwByAGsALgAgAA0ACgAyAC4AIABBACAAbQB1AGwAdABpAC0AZABlAHYAaQBjAGUAIABzAGkAdABlACAAbABpAGMAZQBuAHMAZQAgAHUAcABnAHIAYQBkAGUAIABtAHUAcwB0ACAAYgBlACAAcAB1AHIAYwBoAGEAcwBlAGQAIABmAG8AcgAgAG0AdQBsAHQAaQBwAGwAZQAgAGQAZQB2AGkAYwBlACAAdQBzAGUAIABhAGMAYwBvAHIAZABpAG4AZwAgAHQAbwAgAGEAIABtAHUAbAB0AGkALQBkAGUAdgBpAGMAZQAgAGwAaQBjAGUAbgBzAGUAIABzAGMAaABlAGQAdQBsAGUAIABhAHYAYQBpAGwAYQBiAGwAZQAgAGEAdAAgAHcAdwB3AC4AaABvAHUAcwBlAGkAbgBkAHUAcwB0AHIAaQBlAHMALgBjAG8AbQAvAGwAaQBjAGUAbgBzAGUALgAgAEUAYQBjAGgAIABsAG8AYwBhAHQAaQBvAG4AIABhAG4AZAAvAG8AcgAgAGUAbgB0AGkAdAB5ACAAbQB1AHMAdAAgAHAAdQByAGMAaABhAHMAZQAgAGEAIABzAGUAcABhAHIAYQB0AGUAIABsAGkAYwBlAG4AcwBlACwAIABzAHQAYQByAHQAaQBuAGcAIAB3AGkAdABoACAAdABoAGUAIABmAGkAcgBzAHQAIABkAGUAdgBpAGMAZQAuACAAQQBuACAAbwB1AHQAcAB1AHQAIABkAGUAdgBpAGMAZQAgAGkAcwAgAGEAbgB5ACAAcAByAGkAbgB0AGUAcgAsACAAcwB1AGMAaAAgAGEAcwAgAGEAIABMAGkAbgBvAHQAcgBvAG4AaQBjACAAcgBhAHMAdABlAHIAaQB6AGUAcgAsACAAbABhAHMAZQByACAAcAByAGkAbgB0AGUAcgAsACAAbwByACAAZABvAHQALQBtAGEAdAByAGkAeAAgAHAAcgBpAG4AdABlAHIALAAgAGEAbgB5ACAAdgBpAGQAZQBvACAAZABpAHMAcABsAGEAeQAgAHQAZQByAG0AaQBuAGEAbAAgAG8AcgAgAGEAbgB5ACAAbwB0AGgAZQByACAAZABlAHYAaQBjAGUAIAB3AGgAZQByAGUAIABkAGkAcwBwAGwAYQB5ACAAaQBzACAAZwBlAG4AZQByAGEAdABlAGQAIABmAHIAbwBtACAAdABoAGUAIABmAG8AbgB0ACAAcwBvAGYAdAB3AGEAcgBlACAAbwB1AHQAbABpAG4AZQBzACwAIABzAHUAYwBoACAAYQBzACAAdwBpAHQAaAAgAHQAaABlACAAdQBzAGUAIABvAGYAIABBAGQAbwBiAGUAIABUAHkAcABlACAATQBhAG4AYQBnAGUAcgAgAG8AcgAgAG4AYQB0AGkAdgBlACAAVAByAHUAZQBUAHkAcABlACAAcgBhAHMAdABlAHIAaQB6AGUAcgAgAGkAZgAgAHQAaABlACAAZgBvAG4AdAAgAGkAcwAgAHQAbwAgAGIAZQAgAHUAcwBlAGQAIABwAHIAaQBtAGEAcgBpAGwAeQAgAGYAbwByACAAZABpAHMAcABsAGEAeQAgAHQAZQByAG0AaQBuAGEAbABzACAAdABoAGEAdAAgAGcAZQBuAGUAcgBhAHQAZQAgAHQAaABlACAAbwB1AHQAcAB1AHQALAAgAGEAcwAgAGkAbgAgAGEAIABtAHUAbAB0AGkAbQBlAGQAaQBhACAAQwBEAC4AIAANAAoAMwAuACAASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAGYAbwBuAHQAIABzAG8AZgB0AHcAYQByAGUAIABtAGEAeQAgAG4AbwB0ACAAYgBlACAAYwBvAHAAaQBlAGQAIABvAHIAIABkAHUAcABsAGkAYwBhAHQAZQBkACAAaQBuACAAYQBuAHkAIABmAG8AcgBtACAAZQB4AGMAZQBwAHQAIABmAG8AcgAgAGIAYQBjAGsAdQBwACAAcAB1AHIAcABvAHMAZQBzAC4AIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAZgBvAG4AdAAgAHMAbwBmAHQAdwBhAHIAZQAgAG8AcgAgAGQAbwBjAHUAbQBlAG4AdABhAHQAaQBvAG4AIABtAGEAeQAgAG4AbwB0ACAAYgBlACAAcgBlAG4AdABlAGQALAAgAGwAZQBhAHMAZQBkACwAIABzAHUAYgBsAGkAYwBlAG4AcwBlAGQAIABvAHIAIABsAGUAbgB0ACAAdABvACAAYQBuAG8AdABoAGUAcgAgAHAAZQByAHMAbwBuACAAbwByACAAZQBuAHQAaQB0AHkALgAgAA0ACgA0AC4AIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAZgBvAG4AdAAgAHMAbwBmAHQAdwBhAHIAZQAgAG0AYQB5ACAAbgBvAHQAIABiAGUAIAByAGUAdAB1AHIAbgBlAGQAIABvAHIAIABlAHgAYwBoAGEAbgBnAGUAZAAgAHUAbgBsAGUAcwBzACAAZABlAGYAZQBjAHQAaQB2AGUALgAgAEQAZQBmAGUAYwB0AGkAdgBlACAAcwBvAGYAdAB3AGEAcgBlACAAcwBoAGEAbABsACAAYgBlACAAcgBlAHAAbABhAGMAZQBkACAAYgB5ACAAdABoAGUAIABzAGEAbQBlACAAcwBvAGYAdAB3AGEAcgBlACAAaQBmACAAYQBjAGMAbwBtAHAAYQBuAGkAZQBkACAAdwBpAHQAaAAgAHAAdQByAGMAaABhAHMAZQAgAHIAZQBjAGUAaQBwAHQAIABhAG4AZAAgAHMAZQBsAGwAZQByACAAaQBzACAAbgBvAHQAaQBmAGkAZQBkACAAdwBpAHQAaABpAG4AIABvAG4AZQAgAHcAZQBlAGsAIABvAGYAIABwAHUAcgBjAGgAYQBzAGUALgAgAA0ACgA1AC4AIABBAG4AeQAgAHMAbwBmAHQAdwBhAHIAZQAsACAARQBQAFMAIABmAGkAbABlACwAIABpAGwAbAB1AHMAdAByAGEAdABpAG8AbgAsACAAbwByACAAYQBuAHkAdABoAGkAbgBnACAAZABlAHIAaQB2AGUAZAAgAGYAcgBvAG0AIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAZgBvAG4AdAAgAHMAbwBmAHQAdwBhAHIAZQAgAG0AdQBzAHQAIABiAGUAIAB1AHMAZQBkACAAYQBjAGMAbwByAGQAaQBuAGcAIAB0AG8AIAB0AGgAZQAgAG8AcgBpAGcAaQBuAGEAbAAgAGwAaQBjAGUAbgBzAGkAbgBnACAAdABlAHIAbQBzAC4AIABUAGgAaQBzACAAbQBlAGEAbgBzACwAIABmAG8AcgAgAGUAeABhAG0AcABsAGUALAAgAHQAaABhAHQAIABhAG4AeQAgAG0AbwBkAGkAZgBpAGUAZAAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABmAG8AbgB0ACwAIABvAHIAIABhAG4AeQAgAG8AdQB0AGwAaQBuAGUAIABpAG4AZgBvAHIAbQBhAHQAaQBvAG4AIABkAGUAcgBpAHYAZQBkACAAZgByAG8AbQAgAGEAbgB5ACAASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAGYAbwBuAHQAIABpAHMAIABzAHQAaQBsAGwAIABsAGkAYwBlAG4AcwBlAGQAIABmAG8AcgAgAHQAaABlACAAcwBhAG0AZQAgAG4AdQBtAGIAZQByACAAbwBmACAAZABlAHYAaQBjAGUAcwAgAGEAcwAgAHQAaABlACAAbwByAGkAZwBpAG4AYQBsACAAYQBuAGQAIABtAGEAeQAgAG4AbwB0ACAAYgBlACAAcwB1AGIAbABpAGMAZQBuAHMAZQBkACwAIABnAGkAdgBlAG4AIABhAHcAYQB5ACwAIABvAHIAIABzAG8AbABkACAAdwBpAHQAaABvAHUAdAAgAHcAcgBpAHQAdABlAG4AIABwAGUAcgBtAGkAcwBzAGkAbwBuACAAZgByAG8AbQAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMALgAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABpAHMAIAByAGUAcwBwAG8AbgBzAGkAYgBsAGUAIABmAG8AcgAgAHQAZQBjAGgAbgBpAGMAYQBsACAAcwB1AHAAcABvAHIAdAAgAG8AZgAgAGkAdABzACAAbwBmAGYAaQBjAGkAYQBsAGwAeQAgAGQAaQBzAHQAcgBpAGIAdQB0AGUAZAAgAGYAbwBuAHQAcwAgAG8AbgBsAHkALgAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABpAHMAIABuAG8AdAAgAHIAZQBzAHAAbwBuAHMAaQBiAGwAZQAgAGYAbwByACAAbQBvAGQAaQBmAGkAZQBkACAAYQBuAGQALwBvAHIAIAByAGUAZwBlAG4AZQByAGEAdABlAGQAIABzAG8AZgB0AHcAYQByAGUALgAgAA0ACgA2AC4AIABUAGgAaQBzACAAbABpAGMAZQBuAHMAZQAgAGQAbwBlAHMAIABuAG8AdAAgAHAAZQByAG0AaQB0ACAAYQBuAHkAIABmAG8AcgBtACAAbwBmACAAZQBtAGIAZQBkAGQAaQBuAGcAIABvAHIAIABlAG4AYwByAHkAcAB0AGkAbgBnACAAbwBmACAASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAGYAbwBuAHQAIABzAG8AZgB0AHcAYQByAGUAIABpAG4AIABkAGkAZwBpAHQAYQBsACAAZABvAGMAdQBtAGUAbgB0AHMAIABvAHIAIABhAG4AeQAgAG8AdABoAGUAcgAgAGYAbwByAG0ALgAgAEkAZgAgAGUAbQBiAGUAZABkAGkAbgBnACAAbwBmACAASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAGYAbwBuAHQAcwAgAGkAcwAgAGQAZQBzAGkAcgBlAGQALAAgAHQAaABlACAAdQBzAGUAcgAgAG0AdQBzAHQAIABwAHUAcgBjAGgAYQBzAGUAIABhAG4AIABhAGQAZABpAHQAaQBvAG4AYQBsACAAbABpAGMAZQBuAHMAZQAgAGYAcgBvAG0AIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAYgBhAHMAZQBkACAAdQBwAG8AbgAgAHUAcwBhAGcAZQAuACAASQBmACAAYQBuACAAZQBtAGIAZQBkAGQAaQBuAGcAIABsAGkAYwBlAG4AcwBlACAAaQBzACAAZABlAHMAaQByAGUAZAAsACAAbABpAGMAZQBuAHMAZQBlACAAbQB1AHMAdAAgAHIAZQBwAHIAZQBzAGUAbgB0ACAAYQBuAGQAIAB3AGEAcgByAGEAbgB0ACAAdABoAGEAdAAgAGwAaQBjAGUAbgBzAGUAZQAnAHMAIABlAG4AYwByAHkAcAB0AGkAbwBuACAAbwBmACAAdABoAGUAIABlAG0AYgBlAGQAZABlAGQAIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAZgBvAG4AdAAgAHMAbwBmAHQAdwBhAHIAZQAgAGkAcwAgAHMAZQBjAHUAcgBlACAAZQBuAG8AdQBnAGgAIAB0AG8AIABwAHIAZQB2AGUAbgB0ACAAYQBjAGMAZQBzAHMAIABvAHIAIAB1AHMAZQAgAGIAeQAgAGEAbgB5AG8AbgBlACAAdQBzAGkAbgBnACAAdABoAGUAIABzAG8AZgB0AHcAYQByAGUAIABpAG4AIAB3AGgAaQBjAGgAIAB0AGgAZQAgAGYAbwBuAHQAIABkAGEAdABhACAAaQBzACAAZQBtAGIAZQBkAGQAZQBkAC4AIAANAAoANwAuACAAVABoAGUAIAB1AHMAZQByACAAbwBmACAAdABoAGkAcwAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABmAG8AbgB0ACAAcwBvAGYAdAB3AGEAcgBlACAAYQBnAHIAZQBlAHMAIAB0AG8AIABjAHIAZQBkAGkAdAAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABhAHMAIAB0AGgAZQAgAHQAcgBhAGQAZQBtAGEAcgBrACAAYQBuAGQAIABjAG8AcAB5AHIAaQBnAGgAdAAgAG8AdwBuAGUAcgAgAG8AZgAgAHQAaABlACAASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAGYAbwBuAHQAcwAgAGEAbgBkACAAbABpAHMAdAAgAHQAaABlACAAZgBvAG4AdAAgAG4AYQBtAGUAcwAsACAAdwBoAGUAcgBlAHYAZQByACAAYQBuAGQAIAB3AGgAZQBuAGUAdgBlAHIAIABkAGUAcwBpAGcAbgAsACAAcAByAG8AZAB1AGMAdABpAG8AbgAsACAAbwByACAAYQBuAHkAIABvAHQAaABlAHIAIABjAHIAZQBkAGkAdABzACAAYQByAGUAIABzAGgAbwB3AG4ALgAgAA0ACgA4AC4AIABBAG4AeQAgAHYAaQBvAGwAYQB0AGkAbwBuACAAYgB5ACAAbABpAGMAZQBuAHMAZQBlACAAbwBmACAAdABoAGkAcwAgAGEAZwByAGUAZQBtAGUAbgB0ACAAcwBoAGEAbABsACAAYwBhAHUAcwBlACAAdABoAGkAcwAgAGwAaQBjAGUAbgBzAGUAIAB0AG8AIABiAGUAIAB0AGUAcgBtAGkAbgBhAHQAZQBkAC4AIABJAG4AIAB0AGgAZQAgAGUAdgBlAG4AdAAgAG8AZgAgAHQAZQByAG0AaQBuAGEAdABpAG8AbgAsACAAYQBuAGQAIAB3AGkAdABoAG8AdQB0ACAAbABpAG0AaQB0AGkAbgBnACAAYQBuAHkAIABvAHQAaABlAHIAIAByAGUAbQBlAGQAaQBlAHMAIAB3AGgAaQBjAGgAIABtAGEAeQAgAGIAZQAgAGEAdgBhAGkAbABhAGIAbABlACAAYQBnAGEAaQBuAHMAdAAgAHkAbwB1ACwAIAB5AG8AdQAgAG0AdQBzAHQAIABpAG0AbQBlAGQAaQBhAHQAZQBsAHkAIAByAGUAdAB1AHIAbgAgAHQAaABlACAAZgBvAG4AdAAgAHMAbwBmAHQAdwBhAHIAZQAgAHQAbwAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABhAG4AZAAgAGMAZQByAHQAaQBmAHkAIAB0AGgAYQB0ACAAbgBvACAAYwBvAHAAaQBlAHMAIAByAGUAbQBhAGkAbgAgAGkAbgAgAHkAbwB1AHIAIABwAG8AcwBzAGUAcwBzAGkAbwBuACAAbwByACAAZQB4AGkAcwB0ACAAbwBuACAAdABoAGUAIABvAHIAaQBnAGkAbgBhAGwAbAB5ACAAbABpAGMAZQBuAHMAZQBkACAAcwBpAHQAZQAuACAADQAKADkALgAgAEgAbwB1AHMAZQAgAEkAbgBkAHUAcwB0AHIAaQBlAHMAIABtAGEAawBlAHMAIABuAG8AIAB3AGEAcgByAGEAbgB0AGkAZQBzACAAZQB4AHAAcgBlAHMAcwAgAG8AcgAgAGkAbQBwAGwAaQBlAGQAIABhAHMAIAB0AG8AIABtAGUAcgBjAGgAYQBuAHQAYQBiAGkAbABpAHQAeQAsACAAZgBpAHQAbgBlAHMAcwAgAGYAbwByACAAYQAgAHAAYQByAHQAaQBjAHUAbABhAHIAIABwAHUAcgBwAG8AcwBlACwAIABvAHIAIABvAHQAaABlAHIAdwBpAHMAZQAuACAAVwBpAHQAaABvAHUAdAAgAGwAaQBtAGkAdABpAG4AZwAgAHQAaABlACAAYQBmAG8AcgBlAG0AZQBuAHQAaQBvAG4AZQBkACwAIABIAG8AdQBzAGUAIABJAG4AZAB1AHMAdAByAGkAZQBzACAAcwBoAGEAbABsACAAaQBuACAAbgBvACAAZQB2AGUAbgB0ACAAYgBlACAAbABpAGEAYgBsAGUAIABmAG8AcgAgAGEAbgB5ACAAZABpAHIAZQBjAHQALAAgAGkAbgBkAGkAcgBlAGMAdAAsACAAYwBvAG4AcwBlAHEAdQBlAG4AdABpAGEAbAAsACAAbwByACAAaQBuAGMAaQBkAGUAbgB0AGEAbAAgAGQAYQBtAGEAZwBlAHMALAAgAGkAbgBjAGwAdQBkAGkAbgBnACAAZABhAG0AYQBnAGUAcwAgAGYAcgBvAG0AIABsAG8AcwBzACAAbwBmACAAYgB1AHMAaQBuAGUAcwBzACAAcAByAG8AZgBpAHQAcwAsACAAYgB1AHMAaQBuAGUAcwBzACAAaQBuAHQAZQByAHIAdQBwAHQAaQBvAG4ALAAgAGEAbgBkACAAbABvAHMAcwAgAG8AZgAgAGIAdQBzAGkAbgBlAHMAcwAgAGkAbgBmAG8AcgBtAGEAdABpAG8AbgAsACAAYQByAGkAcwBpAG4AZwAgAG8AdQB0ACAAbwBmACAAdABoAGUAIAB1AHMAZQAgAG8AcgAgAGkAbgBhAGIAaQBsAGkAdAB5ACAAdABvACAAdQBzAGUAIAB0AGgAZQAgAHAAcgBvAGQAdQBjAHQALgAgAA0ACgAxADAALgAgAE0AdQBsAHQAaQAtAGQAZQB2AGkAYwBlACAATABpAGMAZQBuAHMAZQAgAFUAcABnAHIAYQBkAGUAIABTAGMAaABlAGQAdQBsAGUAOgANAAoADQAKAAkASABvAHUAcwBlACAASQBuAGQAdQBzAHQAcgBpAGUAcwAgAHMAbwBmAHQAdwBhAHIAZQAgAGkAcwAgAGEAdQB0AG8AbQBhAHQAaQBjAGEAbABsAHkAIABsAGkAYwBlAG4AcwBlAGQAIABmAG8AcgAgAHUAcwBlACAAbwBuACAAYQAgAG0AYQB4AGkAbQB1AG0AIABvAGYAIABzAGkAeAAgAHIAYQBzAHQAZQByAGkAegBpAG4AZwAgAGQAZQB2AGkAYwBlAHMAIABjAG8AbgBuAGUAYwB0AGUAZAAgAHQAbwAgAHQAaABlACAAcwBhAG0AZQAgAGwAbwBjAGEAbAAgAGEAcgBlAGEAIABuAGUAdAB3AG8AcgBrAC4AIAAgAEUAYQBjAGgAIABsAG8AYwBhAHQAaQBvAG4AIABhAG4AZAAvAG8AcgAgAGUAbgB0AGkAdAB5ACAAbQB1AHMAdAAgAHAAdQByAGMAaABhAHMAZQAgAGEAIABzAGUAcABhAHIAYQB0AGUAIABsAGkAYwBlAG4AcwBlACwAIABzAHQAYQByAHQAaQBuAGcAIAB3AGkAdABoACAAdABoAGUAIABmAGkAcgBzAHQAIABkAGUAdgBpAGMAZQAuACAAVABoAGUAIAB1AHAAZwByAGEAZABlACAAcAByAGkAYwBlACAAaQBzACAAYwBhAGwAYwB1AGwAYQB0AGUAZAAgAGEAcwAgAGEAIABwAGUAcgBjAGUAbgB0AGEAZwBlACAAbwBmACAAdABoAGUAIABvAHIAaQBnAGkAbgBhAGwAIABwAHIAaQBjAGUAIABvAGYAIAB0AGgAZQAgAHMAbwBmAHQAdwBhAHIAZQAuACAAVABoAGUAIABmAG8AbABsAG8AdwBpAG4AZwAgAGkAcwAgAGMAdQBtAHUAbABhAHQAaQB2AGUAOgANAAoADQAKAAkALQAgAHUAcAAgAHQAbwAgADEAMAAgAGQAZQB2AGkAYwBlAHMAOgAgAGEAZABkACAANQAwACAAcABlAHIAYwBlAG4AdAAgAG8AZgAgAG8AcgBpAGcAaQBuAGEAbAAgAHAAcgBpAGMAZQA7AA0ACgAJAC0AIAAxADEAIAB0AG8AIAA1ADAAIABkAGUAdgBpAGMAZQBzADoAIABhAGQAZAAgADIAMAAgAHAAZQByAGMAZQBuAHQAIABvAGYAIABvAHIAaQBnAGkAbgBhAGwAIABwAHIAaQBjAGUAIABmAG8AcgAgAGUAYQBjAGgAIAA1ACAAZABlAHYAaQBjAGUAcwA7AA0ACgAJAC0AIAA1ADEAIAB0AG8AIAAxADIANQAgAGQAZQB2AGkAYwBlAHMAOgAgAGEAZABkACAAMQA1ACAAcABlAHIAYwBlAG4AdAAgAG8AZgAgAG8AcgBpAGcAaQBuAGEAbAAgAHAAcgBpAGMAZQAgAGYAbwByACAAZQBhAGMAaAAgADUAIABkAGUAdgBpAGMAZQBzADsADQAKAAkALQAgADEAMgA2ACAAdABvACAAMgA1ADAAIABkAGUAdgBpAGMAZQBzADoAIABhAGQAZAAgADEAMAAgAHAAZQByAGMAZQBuAHQAIABvAGYAIABvAHIAaQBnAGkAbgBhAGwAIABwAHIAaQBjAGUAIABmAG8AcgAgAGUAYQBjAGgAIAA1ACAAZABlAHYAaQBjAGUAcwA7AA0ACgAJAC0AIAAyADUAMQAgAGQAZQB2AGkAYwBlAHMAIABhAG4AZAAgAG8AdgBlAHIAOgAgAGEAZABkACAANQAgAHAAZQByAGMAZQBuAHQAIABvAGYAIABvAHIAaQBnAGkAbgBhAGwAIABwAHIAaQBjAGUAIABmAG8AcgAgAGUAYQBjAGgAIAA1ACAAZABlAHYAaQBjAGUAcwA7AA0ACgANAAoASQBmACAAeQBvAHUAcgAgAHUAcwBhAGcAZQAgAGUAeABjAGUAZQBkAHMAIAB0AGgAZQAgAG4AdQBtAGIAZQByACAAbwBmACAAZABlAHYAaQBjAGUAcwAgAGYAbwByACAAYQAgAGcAaQB2AGUAbgAgAG8AdQB0AHAAdQB0ACAAZABlAHYAaQBjAGUAIABjAGEAdABlAGcAbwByAHkALAAgAHkAbwB1ACAAbQB1AHMAdAAgAHAAdQByAGMAaABhAHMAZQAgAHQAaABlACAAdQBwAGcAcgBhAGQAZQAgAHcAaQB0AGgAIAB0AGgAZQAgAGEAcABwAGwAaQBjAGEAYgBsAGUAIABuAHUAbQBiAGUAcgAgAG8AZgAgAGQAZQB2AGkAYwBlAHMALgAgAEMAYQBsAGwAIAAzADAAMgAtADIAMwA0AC0AMgAzADUANgAgAGYAbwByACAAYQAgAHEAdQBvAHQAZQAuAGgAdAB0AHAAOgAvAC8AdwB3AHcALgBoAG8AdQBzAGUAaQBuAGQAdQBzAHQAcgBpAGUAcwAuAGMAbwBtAC8AbABpAGMAZQBuAHMAZQBCAHUAcgBiAGEAbgBrACAAQgBpAGcAIABDAG8AbgBkAGUAbgBzAGUAZABCAGwAYQBjAGsAAAAAAAADAAAAAwAAASIAAQAAAAAAHAADAAEAAAEiAAABBgAAAAAAAAAAAAAAEwAAABMAAAAAAAAAAAAAAAAAAAAAAAATFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcQByc3R1dnd4eXp7fH1+f4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ4An6AAAAAAoQAAAAAAAKKjAKSlpqcAAKgAAKmqqwCsra6vsLGys7S1trcAuLm6u7y9vr/AwcLDxMXGx8jJysvMzc7PANDR0tPU1dbX2Nna29zd3gAEAvQAAABSAEAABQASAH4AowClAKsAsAC0AQkBEwEfASUBKwExATcBPgFIAU0BZQFzAX4BkgIZAjcCxwLaAt0gFCAaIB4gIiAmIDAgOiBEIKwhICEiIhIkxSTf+wT//wAAACAAoQClAKcArgCyALYBDAEWASIBKgEuATQBOQFBAUwBUAFqAXgBkgIYAjcCxgLYAtsgEyAYIBwgICAmIDAgOSBEIKwhICEiIhIkxSTf+wD////zAAD//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/xYAAP6pAAD+AAAA4J4AAAAAAADgheCU4IPgduAP4Cnfet3/3IPcaQAAAAEAAABQAAAAUgBaAF4AYgEIARYBKAEuATABNgE8AUYBVAFWAYABkgAAAZwAAAGcAAABnAAAAZ4BogGmAAAAAAAAAAAAAAAAAAAAAAAAAAABlgAAAKcAlACVAJYAngCbAKIAqQCaANcAkwAQAA8AnQCYAMEA2wANAKMAqgAMAAsADgCmAKwAxwDFAK0AcgBzAJ8AdADJAHUAxgDIAM0AygDLAMwCTQB2ANAAzgDPAK4AdwASAKAA0wDRANIAeAAFAAcAmQB6AHkAewB9AHwAfgCkAH8AgQCAAIIAgwCFAIQAhgCHAk4AiACKAIkAiwCNAIwAtwClAI8AjgCQAJEABgAIALgA5AEQAOMBDwDlAREA5gESAOgBFADnARMA6QEVAOEA4gDsARgA6wEXAO0BGQDqARYA7wEbAO4BGgDwARwA8QEdAPMBHgD0AR8A8gDUAPUBIAD2ASEA9wEiAPkBJAD4ASMAAQACAPoBJQD8AScA+wEmAP4BKQD9ASgArwCwAP8BKgEBASwBAAErAQIBLQEEAS8BAwEuAAMABAEHATIBBgExAQoBNQEIATMBDAE3AQkBNAELATYAuQENATgBDgE5AAkACgEFATAA1QDeAN0A1gDcALUAtgDCALMAtADDAJIAwACXAUUAvgC/AUYBRwAAAAMAAAAAAAD/tQAyAAAAAAAAAAAAAAAAAAAAAAAAAAABAAQCAAEBARpCdXJiYW5rQmlnQ29uZGVuc2VkLUJsYWNrAAEBASX4EAD5hwH5iAL5iQP4EwQ2+5v6b/paBRwjuA8cJPoRmhxsERIBbwIAAQAFABAAFwAdACMAKQAwADcAPQBDAE4AVABaAGQAawByAHgAgwCPAJoApACrALIAvQDJAM8A1QDhAOcA7QD5AQYBDQETARkBJQErATMBPgFKAVABXAFiAW8BdgF9AYIBiAGSAZgBnwGmAawBsgG9AcMByQHTAdoB4QHnAfIB/gIJAhACFwIiAi4CNAI6AkYCTAJSAl4CawJyAngCfgKKApACmAKjAq8CtQLBAscC1ALbAuIC5wLtAvcC+gMCAwoDFwMiAyoDMwM8A0MDSwNOA1UDYANuA3sDiAOXA6UDswPAA88D3gPsA/wECwQaBCsEOwRLBFoEawR8BIwEmgSmBLIEwgTNBNkE5ATvBPwFCAUUBR8FLAU5BUUFVQVjBXAFfgWNBZ0FqgW4BcEFzgXVBdsF4AXlBeoF7wX0BfkF/gYDBggGDQYSBhcGHAYhBiYGKwYwBjUGOgY/BkQGSQZOBlMGWAZdBmIGZwZsBnEGdgZ7BoAGhQaKBo8GlAaZBp4GowaoBq0Gsga3BrwGwQbGBssG0AbVBtoG3wbrBvUG/wcOBxsHJQcwBzsHRAdOB1gHYgduB30HhweRB5sHqge3B8UHzwfaB+UH7wf+CA4IHQgnCDYIQwhRCFsIZghxCIAIkAiaCKQItAi+CMgI2AjiCOwI+wkICRIJIwkuCTgJQglMCVwJZglwCXwJiwmbCaUJtQm/CckJ2AnlCe8KAAoLChYKHwopCjYKQApKClgKYgpsCnsKiAqSCp0KqAqxCrsKxQrPCtsK6gr0Cv4LCAsXCyQLMgs8C0cLUgtcC2sLewuKC5QLowuwC7oLxQvQC98L7wv5DAMMEwwdDCcMNwxBDEsMWgxnDHEMggyNDJcMoQyrDLsMxQzPDNsM6gz6DQQNFA0eDSgNNw1EDU4NXw1qDXUNfg2IDZUNnw2pDbcNwg3KDdEN2A3hDekN8Q34DgEOCg4SDhwOKA4yDn0OmA6pRXVyb2NvbW1hYWNjZW50dW5pMDIzN0Rjcm9hdGRjcm9hdEFicmV2ZUFtYWNyb25Bb2dvbmVrQ2FjdXRlQ2Nhcm9uQ2NpcmN1bWZsZXhEY2Fyb25FY2Fyb25FZG90YWNjZW50RW1hY3JvbkVvZ29uZWtHYnJldmVHY2lyY3VtZmxleEdjb21tYWFjY2VudEhjaXJjdW1mbGV4SWRvdGFjY2VudEltYWNyb25Jb2dvbmVrSmNpcmN1bWZsZXhLY29tbWFhY2NlbnRMYWN1dGVMY2Fyb25MY29tbWFhY2NlbnROYWN1dGVOY2Fyb25OY29tbWFhY2NlbnRPaHVuZ2FydW1sYXV0T21hY3JvblJhY3V0ZVJjYXJvblJjb21tYWFjY2VudFNhY3V0ZVNjZWRpbGxhU2NpcmN1bWZsZXhTY29tbWFhY2NlbnRUY2Fyb25UY29tbWFhY2NlbnRVYnJldmVVaHVuZ2FydW1sYXV0VW1hY3JvblVvZ29uZWtVcmluZ1phY3V0ZVpkb3RhY2NlbnRhYnJldmVhbWFjcm9uYW9nb25la2NhY3V0ZWNjYXJvbmNjaXJjdW1mbGV4ZGNhcm9uZWNhcm9uZWRvdGFjY2VudGVtYWNyb25lb2dvbmVrZ2JyZXZlZ2NpcmN1bWZsZXhnY29tbWFhY2NlbnRoY2lyY3VtZmxleGltYWNyb25pb2dvbmVramNpcmN1bWZsZXhrY29tbWFhY2NlbnRsYWN1dGVsY2Fyb25sY29tbWFhY2NlbnRuYWN1dGVuY2Fyb25uY29tbWFhY2NlbnRvaHVuZ2FydW1sYXV0b21hY3JvbnJhY3V0ZXJjYXJvbnJjb21tYWFjY2VudHNhY3V0ZXNjZWRpbGxhc2NpcmN1bWZsZXhzY29tbWFhY2NlbnR0Y2Fyb250Y29tbWFhY2NlbnR1YnJldmV1aHVuZ2FydW1sYXV0dW1hY3JvbnVvZ29uZWt1cmluZ3phY3V0ZXpkb3RhY2NlbnRMX0FMX0FhY3V0ZUxfQWJyZXZlTF9BY2lyY3VtZmxleExfQWRpZXJlc2lzTF9BZ3JhdmVMX0FtYWNyb25MX0FvZ29uZWtMX0FyaW5nTF9BdGlsZGVUX2hQY2lyY2xlc2VydmljZW1hcmt6ZXJvLm51bWVyYXRvcm9uZS5udW1lcmF0b3J0d28ubnVtZXJhdG9ydGhyZWUubnVtZXJhdG9yZm91ci5udW1lcmF0b3JmaXZlLm51bWVyYXRvcnNpeC5udW1lcmF0b3JzZXZlbi5udW1lcmF0b3JlaWdodC5udW1lcmF0b3JuaW5lLm51bWVyYXRvcnplcm8uZGVub21pbmF0b3JvbmUuZGVub21pbmF0b3J0d28uZGVub21pbmF0b3J0aHJlZS5kZW5vbWluYXRvcmZvdXIuZGVub21pbmF0b3JmaXZlLmRlbm9taW5hdG9yc2l4LmRlbm9taW5hdG9yc2V2ZW4uZGVub21pbmF0b3JlaWdodC5kZW5vbWluYXRvcm5pbmUuZGVub21pbmF0b3Jkb2xsYXIudGl0bGluZ2NlbnQudGl0bGluZ0V1cm8udGl0bGluZ3N0ZXJsaW5nLnRpdGxpbmd5ZW4udGl0bGluZ3plcm8udGl0bGluZ29uZS50aXRsaW5ndHdvLnRpdGxpbmd0aHJlZS50aXRsaW5nZm91ci50aXRsaW5nZml2ZS50aXRsaW5nc2l4LnRpdGxpbmdzZXZlbi50aXRsaW5nZWlnaHQudGl0bGluZ25pbmUudGl0bGluZ3F1ZXN0aW9uZG93bi5jYXBleGNsYW1kb3duLmNhcHBhcmVubGVmdC5jYXBwYXJlbnJpZ2h0LmNhcGJyYWNrZXRsZWZ0LmNhcGJyYWNrZXRyaWdodC5jYXBicmFjZWxlZnQuY2FwYnJhY2VyaWdodC5jYXBzbGFzaC5jYXBiYWNrc2xhc2guY2FwYmFyLmNhcGF0LmNhcEEuYWx0Qi5hbHRDLmFsdEQuYWx0RS5hbHRGLmFsdEcuYWx0SC5hbHRJLmFsdEouYWx0Sy5hbHRMLmFsdE0uYWx0Ti5hbHRPLmFsdFAuYWx0US5hbHRSLmFsdFMuYWx0VC5hbHRVLmFsdFYuYWx0Vy5hbHRYLmFsdFkuYWx0Wi5hbHRhLmFsdGIuYWx0Yy5hbHRkLmFsdGUuYWx0Zi5hbHRnLmFsdGguYWx0aS5hbHRqLmFsdGsuYWx0bC5hbHRtLmFsdG4uYWx0by5hbHRwLmFsdHEuYWx0ci5hbHRzLmFsdHQuYWx0dS5hbHR2LmFsdHcuYWx0eC5hbHR5LmFsdHouYWx0ZG90bGVzc2kuYWx0QWFjdXRlLmFsdEFicmV2ZS5hbHRBY2lyY3VtZmxleC5hbHRBZGllcmVzaXMuYWx0QWdyYXZlLmFsdEFtYWNyb24uYWx0QW9nb25lay5hbHRBcmluZy5hbHRBdGlsZGUuYWx0Q2FjdXRlLmFsdENjYXJvbi5hbHRDY2VkaWxsYS5hbHRDY2lyY3VtZmxleC5hbHREY2Fyb24uYWx0RWFjdXRlLmFsdEVjYXJvbi5hbHRFY2lyY3VtZmxleC5hbHRFZGllcmVzaXMuYWx0RWRvdGFjY2VudC5hbHRFZ3JhdmUuYWx0RW1hY3Jvbi5hbHRFb2dvbmVrLmFsdEdicmV2ZS5hbHRHY2lyY3VtZmxleC5hbHRHY29tbWFhY2NlbnQuYWx0SGNpcmN1bWZsZXguYWx0SWFjdXRlLmFsdEljaXJjdW1mbGV4LmFsdElkaWVyZXNpcy5hbHRJZG90YWNjZW50LmFsdElncmF2ZS5hbHRJbWFjcm9uLmFsdElvZ29uZWsuYWx0SmNpcmN1bWZsZXguYWx0S2NvbW1hYWNjZW50LmFsdExhY3V0ZS5hbHRMY2Fyb24uYWx0TGNvbW1hYWNjZW50LmFsdE5hY3V0ZS5hbHROY2Fyb24uYWx0TmNvbW1hYWNjZW50LmFsdE50aWxkZS5hbHRPYWN1dGUuYWx0T2NpcmN1bWZsZXguYWx0T2RpZXJlc2lzLmFsdE9ncmF2ZS5hbHRPaHVuZ2FydW1sYXV0LmFsdE9tYWNyb24uYWx0T3RpbGRlLmFsdFJhY3V0ZS5hbHRSY2Fyb24uYWx0UmNvbW1hYWNjZW50LmFsdFNhY3V0ZS5hbHRTY2Fyb24uYWx0U2NlZGlsbGEuYWx0U2NpcmN1bWZsZXguYWx0U2NvbW1hYWNjZW50LmFsdFRjYXJvbi5hbHRUY29tbWFhY2NlbnQuYWx0VWFjdXRlLmFsdFVicmV2ZS5hbHRVY2lyY3VtZmxleC5hbHRVZGllcmVzaXMuYWx0VWdyYXZlLmFsdFVodW5nYXJ1bWxhdXQuYWx0VW1hY3Jvbi5hbHRVb2dvbmVrLmFsdFVyaW5nLmFsdFlhY3V0ZS5hbHRZZGllcmVzaXMuYWx0WmFjdXRlLmFsdFpjYXJvbi5hbHRaZG90YWNjZW50LmFsdGFhY3V0ZS5hbHRhYnJldmUuYWx0YWNpcmN1bWZsZXguYWx0YWRpZXJlc2lzLmFsdGFncmF2ZS5hbHRhbWFjcm9uLmFsdGFvZ29uZWsuYWx0YXJpbmcuYWx0YXRpbGRlLmFsdGNhY3V0ZS5hbHRjY2Fyb24uYWx0Y2NlZGlsbGEuYWx0Y2NpcmN1bWZsZXguYWx0ZGNhcm9uLmFsdGVhY3V0ZS5hbHRlY2Fyb24uYWx0ZWNpcmN1bWZsZXguYWx0ZWRpZXJlc2lzLmFsdGVkb3RhY2NlbnQuYWx0ZWdyYXZlLmFsdGVtYWNyb24uYWx0ZW9nb25lay5hbHRnYnJldmUuYWx0Z2NpcmN1bWZsZXguYWx0Z2NvbW1hYWNjZW50LmFsdGhjaXJjdW1mbGV4LmFsdGlhY3V0ZS5hbHRpY2lyY3VtZmxleC5hbHRpZGllcmVzaXMuYWx0aWdyYXZlLmFsdGltYWNyb24uYWx0aW9nb25lay5hbHRqY2lyY3VtZmxleC5hbHRrY29tbWFhY2NlbnQuYWx0bGFjdXRlLmFsdGxjYXJvbi5hbHRsY29tbWFhY2NlbnQuYWx0bmFjdXRlLmFsdG5jYXJvbi5hbHRuY29tbWFhY2NlbnQuYWx0bnRpbGRlLmFsdG9hY3V0ZS5hbHRvY2lyY3VtZmxleC5hbHRvZGllcmVzaXMuYWx0b2dyYXZlLmFsdG9odW5nYXJ1bWxhdXQuYWx0b21hY3Jvbi5hbHRvdGlsZGUuYWx0cmFjdXRlLmFsdHJjYXJvbi5hbHRyY29tbWFhY2NlbnQuYWx0c2FjdXRlLmFsdHNjYXJvbi5hbHRzY2VkaWxsYS5hbHRzY2lyY3VtZmxleC5hbHRzY29tbWFhY2NlbnQuYWx0dGNhcm9uLmFsdHRjb21tYWFjY2VudC5hbHR1YWN1dGUuYWx0dWJyZXZlLmFsdHVjaXJjdW1mbGV4LmFsdHVkaWVyZXNpcy5hbHR1Z3JhdmUu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EC4QSBBiEHwQlhCwEMoQ5BD+ERgRMhFMEWYRgBGaEbQRzhHoEgISHBI2ElASahKEEp4SuBLSEuwTBhMgEzoTVBNuE4gTohO8E9YT8BQKFCQUPhRYFHIUjBSmFMAU2hT0FQ4VKBVCFVwVdhWQFaoVxBXeFfgWEgAGAAAAghUiFToVUhVqFYIVmhWyFcoV4hX6FhIWKhZCFloWchaKFqIWuhbSFuoXAhcaFzIXShdiF3oXkheqF8IX2hfyGAoYIhg6GFIYahiCGJoYshjKGOIY+hkSGSoZQhlaGXIZihmiGboZ0hnqGgIaGhoyGkoaYhp6GpIaqhrCGtoa8hsKGyIbOhtSG2obghuaG7IbyhviG/ocEhwqHEIcWhxyHIocohy6HNIc6h0CHRodMh1KHWIdeh2SHaodwh3aHfIeCh4iHjoeUh5qHoIemh6yHsoe4h76HxIfKh9CH1ofch+KH6Ifuh/SH+ogAiAaIDIgSiBiIHogkiCqIMIg2iDyIQohIiE6AAYAAACCIEggXiB0IIogoCC2IMwg4iD4IQ4hJCE6IVAhZiF8IZIhqCG+IdQh6iIAIhYiLCJCIlgibiKEIpoisCLGItwi8iMIIx4jNCNKI2AjdiOMI6IjuCPOI+Qj+iQQJCYkPCRSJGgkfiSUJKokwCTWJOwlAiUYJS4lRCVaJXAlhiWcJbIlyCXeJfQmCiYgJjYmTCZiJngmjiakJrom0CbmJvwnEicoJz4nVCdqJ4AnliesJ8In2CfuKAQoGigwKEYoXChyKIgonii0KMoo4Cj2KQwpIik4KU4pZCl6KZAppim8KdIp6Cn+KhQqKipAKlYqbCqCKpgqrirEKtoq8CsGKxwrMitIK14ABgAAAIIqaip+KpIqpiq6Ks4q4ir2KworHisyK0YrWituK4IrliuqK74r0ivmK/osDiwiLDYsSixeLHIshiyaLK4swizWLOos/i0SLSYtOi1OLWItdi2KLZ4tsi3GLdot7i4CLhYuKi4+LlIuZi56Lo4uoi62Lsou3i7yLwYvGi8uL0IvVi9qL34vki+mL7ovzi/iL/YwCjAeMDIwRjBaMG4wgjCWMKowvjDSMOYw+jEOMSIxNjFKMV4xcjGGMZoxrjHCMdYx6jH+MhIyJjI6Mk4yYjJ2MooynjKyMsYy2jLuMwIzFjMqMz4zUjNmM3ozjjOiM7YzyjPe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AAAAEQADAAMt8C3wMeYAATHmAAAAAQAAABEAAwADLdot2jHWAAEx1gAAAAEAAAARAAMAAy3ELcQxxgABMcYAAAABAAAAEQADAAMtri2uMbYAATG2AAAAAQAAABEAAwADLZgtmDGmAAExpgAAAAEAAAARAAMAAy2CLYIxnAABMZwAAAABAAAAEQADAAMtbC1sMZIAATGSAAAAAQAAABEAAwADLVYtVjGMAAExjAAAAAEAAAARAAMAAy1ALUAxhgABMYYAAAABAAAAEQADAAMtKi0qMXYAATF2AAAAAQAAABEAAwADLRQtFDFmAAExZgAAAAEAAAARAAMAAyz+LP4xVgABMVYAAAABAAAAEQADAAMs6CzoMUYAATFGAAAAAQAAABEAAwADLNIs0jE6AAExOgAAAAEAAAARAAMAAyy8LLwxLgABMS4AAAABAAAAEQADAAMspiymMR4AATEeAAAAAQAAABEAAwADLJAskDEOAAExDgAAAAEAAAARAAMAAyx6LHow/gABMP4AAAABAAAAEQADAAMsZCxkMO4AATDuAAAAAQAAABEAAwADLE4sTjDuAAEw7gAAAAEAAAARAAMAAyw4LDgw6AABMOgAAAABAAAAEQADAAMsIiwiMNgAATDYAAAAAQAAABEAAwADLAwsDDDIAAEwyAAAAAEAAAARAAMAAyv2K/YwuAABMLgAAAABAAAAEQADAAMr4CvgMKgAATCoAAAAAQAAABEAAwADK8oryjCYAAEwmAAAAAEAAAARAAMAAyu0K7QwiAABMIgAAAABAAAAEQADAAMrniueMHwAATB8AAAAAQAAABEAAwADK4griDBwAAEwcAAAAAEAAAARAAMAAytyK3IwZgABMGYAAAABAAAAEQADAAMrXCtcMFwAATBcAAAAAQAAABEAAwADK0YrRjBMAAEwTAAAAAEAAAARAAMAAiswKxgAASsYAAAAAQAAABEAAwACKxwrSgABK0oAAAABAAAAEQADAAIrCCtGAAErRgAAAAEAAAARAAMAAir0KzgAASs4AAAAAQAAABEAAwACKuArKgABKyoAAAABAAAAEQADAAIqzCskAAErJAAAAAEAAAARAAMAAiq4Kx4AASseAAAAAQAAABEAAwACKqQrEgABKxIAAAABAAAAEQADAAIqkCsGAAErBgAAAAEAAAARAAMAAip8KwgAASsIAAAAAQAAABEAAwACKmgrBAABKwQAAAABAAAAEQADAAIqVCr2AAEq9gAAAAEAAAARAAMAAipAKugAASroAAAAAQAAABEAAwACKiwq4AABKuAAAAABAAAAEQADAAIqGCrYAAEq2AAAAAEAAAARAAMAAioEKswAASrMAAAAAQAAABEAAwACKfAqwAABKsAAAAABAAAAEQADAAIp3CrAAAEqwAAAAAEAAAARAAMAAinIKrwAASq8AAAAAQAAABEAAwACKbQqsAABKrAAAAABAAAAEQADAAIpoCqkAAEqpAAAAAEAAAARAAMAAimMKpgAASqYAAAAAQAAABEAAwACKXgqjAABKowAAAABAAAAEQADAAIpZCqEAAEqhAAAAAEAAAARAAMAAilQKnwAASp8AAAAAQAAABEAAwACKTwqbgABKm4AAAABAAAAEQADAAIpKCpgAAEqYAAAAAEAAAARAAMAAikUKloAASpaAAAAAQAAABEAAwACKQAqVAABKlQAAAABAAAAEQADAAIo7CpUAAEqVAAAAAEAAAARAAMAAijYKlAAASpQAAAAAQAAABEAAwACKMQqQgABKkIAAAABAAAAEQADAAIosCo0AAEqNAAAAAEAAAARAAMAAiicKiYAASomAAAAAQAAABEAAwACKIgqGAABKhgAAAABAAAAEQADAAIodCoQAAEqEAAAAAEAAAARAAMAAihgKggAASoIAAAAAQAAABEAAwACKEwqBAABKgQAAAABAAAAEQADAAIoOCoAAAEqAAAAAAEAAAARAAMAAigkKfYAASn2AAAAAQAAABEAAwACKBAp7AABKewAAAABAAAAEQADAAIn/CnwAAEp8AAAAAEAAAARAAMAAifoKewAASnsAAAAAQAAABEAAwACJ9Qp3gABKd4AAAABAAAAEQADAAInwCnQAAEp0AAAAAEAAAARAAMAAiesKcIAASnCAAAAAQAAABEAAwACJ5gptAABKbQAAAABAAAAEQADAAInhCmmAAEppgAAAAEAAAARAAMAAidwKZgAASmYAAAAAQAAABEAAwACJ1wpjgABKY4AAAABAAAAEQADAAInSCmEAAEphAAAAAEAAAARAAMAAic0KXwAASl8AAAAAQAAABEAAwACJyApdAABKXQAAAABAAAAEQADAAInDCl2AAEpdgAAAAEAAAARAAMAAib4KXIAASlyAAAAAQAAABEAAwACJuQpZAABKWQAAAABAAAAEQADAAIm0ClWAAEpVgAAAAEAAAARAAMAAia8KVAAASlQAAAAAQAAABEAAwACJqgpSgABKUoAAAABAAAAEQADAAImlCk+AAEpPgAAAAEAAAARAAMAAiaAKTIAASkyAAAAAQAAABEAAwACJmwpNAABKTQAAAABAAAAEQADAAImWCkwAAEpMAAAAAEAAAARAAMAAiZEKSIAASkiAAAAAQAAABEAAwACJjApFAABKRQAAAABAAAAEQADAAImHCkGAAEpBgAAAAEAAAARAAMAAiYIJGIAASRiAAAAAQAAABEAAwACJfQo5AABKOQAAAABAAAAEQADAAIl4CjWAAEo1gAAAAEAAAARAAMAAiXMKMgAASjIAAAAAQAAABEAAwACJbgougABKLoAAAABAAAAEQADAAIlpCisAAEorAAAAAEAAAARAAMAAiWQKJ4AASieAAAAAQAAABEAAwACJXwolgABKJYAAAABAAAAEQADAAIlaCiOAAEojgAAAAEAAAARAAMAAiVUKIIAASiCAAAAAQAAABEAAwACJUAodgABKHYAAAABAAAAEQADAAIlLChqAAEoagAAAAEAAAARAAMAAiUYKF4AASheAAAAAQAAABEAAwACJQQoUAABKFAAAAABAAAAEQADAAIk8ChCAAEoQgAAAAEAAAARAAMAAiTcKDYAASg2AAAAAQAAABEAAwACJMgoKgABKCoAAAABAAAAEQADAAIktCgiAAEoIgAAAAEAAAARAAMAAiSgKBoAASgaAAAAAQAAABEAAwACJIwoDAABKAwAAAABAAAAEQADAAIkeCf+AAEn/gAAAAEAAAARAAMAAiRkJ/gAASf4AAAAAQAAABEAAwACJFAn8gABJ/IAAAABAAAAEQADAAIkPCfkAAEn5AAAAAEAAAARAAMAAiQoJ9YAASfWAAAAAQAAABEAAwACJBQn1gABJ9YAAAABAAAAEQADAAIkACfSAAEn0gAAAAEAAAARAAMAAiPsJ8QAASfEAAAAAQAAABEAAwACI9gntgABJ7YAAAABAAAAEQADAAIjxCeoAAEnqAAAAAEAAAARAAMAAiOwJ5oAASeaAAAAAQAAABEAAwACI5wnjAABJ4wAAAABAAAAEQADAAIjiCd+AAEnfgAAAAEAAAARAAMAAiN0J3AAASdwAAAAAQAAABEAAwACI2AnYgABJ2IAAAABAAAAEQADAAIjTCdUAAEnVAAAAAEAAAARAAMAAiM4J0YAASdGAAAAAQAAABEAAwACIyQnPgABJz4AAAABAAAAEQADAAIjECc2AAEnNgAAAAEAAAARAAMAAiL8JzIAAScyAAAAAQAAABEAAwACIugnLgABJy4AAAABAAAAEQADAAIi1CcgAAEnIAAAAAEAAAARAAMAAiLAJxIAAScSAAAAAQAAABEAAwACIqwnBAABJwQAAAABAAAAEQADAAIimCb2AAEm9gAAAAEAAAARAAMAAiKEJuwAASbsAAAAAQAAABEAAwACInAm4gABJuIAAAABAAAAEQADAAIiXCbUAAEm1AAAAAEAAAARAAMAAiJIJsYAASbGAAAAAQAAABEAAwACIjQmuAABJrgAAAABAAAAEQADAAIiICaqAAEmqgAAAAEAAAARAAMAAiIMJqwAASasAAAAAQAAABEAAwACIfgmqAABJqgAAAABAAAAEQADAAIh5CaaAAEmmgAAAAEAAAARAAMAAiHQJowAASaMAAAAAQAAABEAAwACIbwmfgABJn4AAAABAAAAEQADAAIhqCZwAAEmcAAAAAEAAAARAAMAAiGUJmIAASZiAAAAAQAAABEAAwACIYAmVAABJlQAAAABAAAAEQADAAIhbCZKAAEmSgAAAAEAAAARAAMAAiFYJkAAASZAAAAAAQAAABEAAwACIUQmOAABJjgAAAABAAAAEQADAAIhMCYwAAEmMAAAAAEAAAARAAMAAiEcJiIAASYiAAAAAQAAABEAAwABIPAAASDwAAAAAQAAABEAAwABISQAASEkAAAAAQAAABEAAwABISIAASEiAAAAAQAAABEAAwABIRYAASEWAAAAAQAAABEAAwABIQoAASEKAAAAAQAAABEAAwABIQYAASEGAAAAAQAAABEAAwABIQIAASECAAAAAQAAABEAAwABIPgAASD4AAAAAQAAABEAAwABIO4AASDuAAAAAQAAABEAAwABIPIAASDyAAAAAQAAABEAAwABIPAAASDwAAAAAQAAABEAAwABIOQAASDkAAAAAQAAABEAAwABINgAASDYAAAAAQAAABEAAwABINIAASDSAAAAAQAAABEAAwABIMwAASDMAAAAAQAAABEAAwABIMIAASDCAAAAAQAAABEAAwABILgAASC4AAAAAQAAABEAAwABILoAASC6AAAAAQAAABEAAwABILgAASC4AAAAAQAAABEAAwABIK4AASCuAAAAAQAAABEAAwABIKQAASCkAAAAAQAAABEAAwABIJoAASCaAAAAAQAAABEAAwABIJAAASCQAAAAAQAAABEAAwABIIoAASCKAAAAAQAAABEAAwABIIQAASCEAAAAAQAAABEAAwABIHgAASB4AAAAAQAAABEAAwABIGwAASBsAAAAAQAAABEAAwABIGgAASBoAAAAAQAAABEAAwABIGQAASBkAAAAAQAAABEAAwABIGYAASBmAAAAAQAAABEAAwABIGQAASBkAAAAAQAAABEAAwABIFgAASBYAAAAAQAAABEAAwABIEwAASBMAAAAAQAAABEAAwABIEAAASBAAAAAAQAAABEAAwABIDQAASA0AAAAAQAAABEAAwABIC4AASAuAAAAAQAAABEAAwABICgAASAoAAAAAQAAABEAAwABICYAASAmAAAAAQAAABEAAwABICQAASAkAAAAAQAAABEAAwABIBwAASAcAAAAAQAAABEAAwABIBQAASAUAAAAAQAAABEAAwABIBoAASAaAAAAAQAAABEAAwABIBgAASAYAAAAAQAAABEAAwABIAwAASAMAAAAAQAAABEAAwABIAAAASAAAAAAAQAAABEAAwABH/QAAR/0AAAAAQAAABEAAwABH+gAAR/oAAAAAQAAABEAAwABH9wAAR/cAAAAAQAAABEAAwABH9AAAR/QAAAAAQAAABEAAwABH8gAAR/IAAAAAQAAABEAAwABH8AAAR/AAAAAAQAAABEAAwABH7oAAR+6AAAAAQAAABEAAwABH7QAAR+0AAAAAQAAABEAAwABH7gAAR+4AAAAAQAAABEAAwABH7YAAR+2AAAAAQAAABEAAwABH6oAAR+qAAAAAQAAABEAAwABH54AAR+eAAAAAQAAABEAAwABH5oAAR+aAAAAAQAAABEAAwABH5YAAR+WAAAAAQAAABEAAwABH4wAAR+MAAAAAQAAABEAAwABH4IAAR+CAAAAAQAAABEAAwABH4YAAR+GAAAAAQAAABEAAwABH4QAAR+EAAAAAQAAABEAAwABH3gAAR94AAAAAQAAABEAAwABH2wAAR9sAAAAAQAAABEAAwABH2AAAR9gAAAAAQAAABEAAwAB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AhYAAQABAF0AAQABAZwAAQACAF4BIQABAAIBnQIYAAEABABfASIBIwEkAAEABAGeAhkCGgIbAAEAAQBgAAEAAQGfAAEABQBhAIgBJQEmAScAAQAFAaACHAIdAh4CHwABAAEALAABAAECSQABAAgAYgCJAIoAiwCMAI0BKAEpAAIAAgGhAaEAAAIgAiYAAQABAAEAJAABAAECQQABAAEAYwABAAEBogABAAEAIQABAAECSgABAAEAZAABAAEBowABAAEAMgABAAECSwABAAQAZQEqASsBLAABAAQBpAInAigCKQABAAYABABmAS0BLgEvATAAAgACAaUBpQAAAioCLgABAAEAAQAqAAEAAQJHAAEAAQApAAEAAQJGAAEAAwBnATEBMgABAAMBpgIvAjAAAQABACYAAQABAkMAAQABACUAAQABAkIAAgADAGgAaAAAAI4AkQABATMBNwAFAAIAAgGnAacAAAIxAjkAAQABAAEAaQABAAEBqAABAAEAagABAAEBqQABAAEAawABAAEBqgABAAMABgBsALgAAQADAasCOgI7AAEABAAKAG0BOAE5AAEABAGsAjwCPQI+AAEAAQAjAAEAAQJAAAEAPAABAAIABwAIABQAFwAbABwAIQAiADIAMwBOAE8AUABuAG8AcACUAJUAnwCgAKEApAClAKYApwCvALAAuwDUAOAA4QDiAPIBXgFfAWABYQFiAW0BbgFvAXABcQFyAXMBdAF1AXYBdwF4Aa0BywI/AkoCSwJMAk0CTgACABEAAwAGAAAACQAKAAQAIwAsAAYANABNABAAVABtACoAcgCRAEQArACuAGQAuAC5AGcAxQDTAGkA4wDxAHgA8wE5AIcBSgFdAM4BYwFsAOIBeQGsAOwBrgHKASABzAI+AT0CQAJJAbAAAgAWAAMABgAAAAkACgAEABQAFAAGACEAIQAHACMALAAIADIAMgASADQATQATAFQAbQAtAHIAgwBHAIgAkQBZAKwArgBjALgAuQBmAMUA0wBoAOMBHQB3AR8BHwCyASEBOQCzAUoBUwDMAXkBrADWAa4CEAEKAhYCFgFtAhgCPgFuAkACTAGVAAAAAQAAAAoAHgAsAAFsYXRuAAgABAAAAAD//wABAAAAAWtlcm4ACAAAAAEAAAABAAQAAgAAAAIACgVwAAF31gAEAAAAOAB6AKgA7gD4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AAAAAAAAAA8ACv/7AAAAAAAAAAAAAAAAAAUACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAPAA8AD//2//sAAAAKAA8ACgAAAAoADwAAAAAAFAAKAAD/+wAPAAr/4v/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAABQAF//sACgAKAAAABQAFAAAAAP/x//EABf/7AAAAAAAAAAoABQAKAAAAAP/2AAoACgAKAAoABQAAAAoACgAKAAoACgAAAAAAAAAAAAAAAAAAAAAABQAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAUAAD/+wAKAAD/8QAPABQAAAAA//sAAP/2//EACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAoAAP/7AAAAAAAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAX/9v/7AAD/8QAA//YADwAFAAD/9gAA/+z/9v/2//sAAP/sAAAAAAAA//sAAAAAAAAAAP/7AAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAUAAAAAAAKAAD/+wAPAA8AAP/2AAAAAP/7//sACgAAAAAADwAAAAD/zv/nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAA//EAAAAAAAUAAP/7AAAAAP/2AAAAAP/2AAAAAAAAAAAAAAAAAAAAAP/iAAAADwAAAAD/+//d/+z/9v/7AAD/+//7AAAAAAAA//v/9v/2//sAAP/7AAr/8QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAUACv/s/+wAAP/7AAUAAAAAAAAACgAAAAAAAAAAAAD/8QAKAAD/0//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7//YAAAAA//YACgAA//YAAAAA//v/+//x/+z/+//2AAAABf/7AAAABQAKAAAAAP/2AAD/+//7//sABf/2//sAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAX/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/8f/s/+z/4gAAABT/yf/x//H/7P/2/9j/9v/T/8T/8f/2AAAAAAAA//EAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//v/5//sAAD/8f/nAAD/+//sAAD/8f/nAAAAAAAAAAAAAP/xAAD/+wAA//H/3f/Y/+f/0//7/9MACv/s//b/2AAA/8n/4v/i/+L/3f/dAAAAAP/7/93/+wAA/+f/+//d/+cAAAAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAFP/OAAr/+//T/8n/2P/Y/84ACgAA/+IAAP/n/87/zv/O/+z/zgAAABQAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACv/T/+IAD//7AAoAAAAK/87/9v/7/+z/8QAF/84AFAAPABQADwAKABT/4v/sAAr/2AAU/+L/zv/J/93/4gAK/9j/8f/sAAoAD//iAAAAAAAAAAAAAAAAAA8ACv/7/90ACgAAAAAAAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAD/5wAKAAAACv/x//YABQAKAA8ACgAAAAoACgAAAAAADwAPAAAAAAAPAAr/xP/OAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACv/2AAAAAAAA/90ACgAA//sACgAF//v/+//Y/93/9v/2//EAAP/x//sABQAP//sABf+mAAAAAAAAAAAAD//7AAUACgAK//v/8f/7AAAAAAAA//YAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAP//sAAP/2//b/+wAKAAoABQAA//sAAP/2//sACgAPAAAAAAAAAAoAAAAeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAABQAAAAAAAAAAAAAAAAAA//v/+wAA/+cAAP/7AA//+wAAAAAABQAAAAD/+wAA//sAAAAAAAAABQAAAAUABQAF//H/7P/xAAAAAAAA/+wAAAAA//sACv/7AAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAKAAoAAP/2//v/9gAFAAAACgAAAAAAAAAA//YACgAKAAAAAAAKAAr/4v/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAA//sACgAF//sAAAAA//v/+//2/+wAAAAAAAD/+//7AAoAAAAAAAAAAAAA//sAAAAAAAAAAP/7AAAAAAAAAAoACv/7AAAAAAAAAAUAAAAAAAUACgAAAAX/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7AAP/+f/8QAKAA//0wAKAA//4v/s/9P/9v/Y/9MADwAK//YADwAAAAD/xP/sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAKAAoAAP/2/+cAAAAAAAoAAP/xAAoACgAAAAoAAP+6AAr/2AAAAAD/2P/i//H/3f/J/9gADwAKAAr/5//E/7X/v//E/8n/0//EAAUABQAA/7//zv/O/7oAAP/JAAr/yQAAAAAAAAAAAAAAPAA8AB4AKAAAAAAAAAAAAAD/+wAFAAUACgAAAAAAAAAFAA8ABQAAAAUACgAAAAAAAAAAAAAAAAAAAAX/0//2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUABQAAAAAABQAF//EAAAAAAAAAAAAAAAD/+//2//YAAP/7AAAAAP/7AAAABQAPAAAAAP/sAAAAAAAAAAAABf/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAX/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+//7AAoACv/n//EAAP/7AAoABQAAAAAACgAAAAAAAAAAAAD/8QAKAAD/0//nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2//YAAAAA//YAAAAA//YAAAAA//v/+//s/+z/9v/7//sAAP/2AAAABQAKAAAAAP/xAAD/9v/7//sABf/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7AAA//H/9gAUABT/5wAFAAX/8f/i//H/+//n/+wAAAAA//YACgAA//b/zv/nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAX/+//x//H/+//2AAoAAP/xAA8ACgAAAAoAAP/YAAr/8QAK//H/8f/2//H/7P/T/+cAGf/7AAr/8f/s//H/8f/x/+L/7P/dAAoACgAA/93/5//n/+L/8f/s//v/5wAAAAAAAAAAAAAAMgA8AB4AHgAAAAAAAAAAAAD/7AAF//b/+wAKAAD/+wAFAAX/+//x//b/+//x//sABQAAAAAAAAAAAAD/3f/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAP/7//sAAP/7AAoAAP/7AAoABQAAAAoAAP/nAAr/+wAA//v/+//7//v/+//x//YAFAAAAAr/+//x//v/+//7/+z/8f/sAAUABQAA/+z/9v/2//H/+//xAAD/7AAAAAAAAAAAAAAAPAA8AB4AHgAAAAAAAAAAAAD/7P/s//H/4gAAAAD/2P/s/+z/5wAA/9P/+//T/87/7P/sAAAAAP/7//EAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//v/9v/s//v/9v/xAAAAAP/xAAD/9v/nAAD/+wAAAAAAAP/xAAD/+wAA//b/5//i/+f/3f/7/9MAAP/x//b/3QAA/87/5//i/+z/4v/dAAAAAAAA/90AAAAA/+wAAP/i/+IAAAAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAD/zv/7/8n/2AAAAAr/yf/2//v/2P/T/8T/9v/E/8n/9v/7//YAAAAA/+L/yf/T//YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7P/2AAr/8f/d/90AAP/nAAr/9v/iAAoABQAAAAUAAP+1AAr/0wAA/+f/2P/i/+L/0/+//84AFP/2AAD/3f/J/9P/2P/Y/8T/yf+6AAAAAAAA/7X/yf/J/8T/5//J//H/yQAAAAAAAAAAAAAAKAAyAB4AHgAAAAAAAAAAAAAAAAAP//v/+wAAAAD/7AAKAAoAAAAA/+L/+//s//EACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUABQAAAAAAAAAAAAAAAP/2AAAAAAAAAAAAAAAAAAoAAAAAAAD/9v/7AAD/8QAA/+wACgAAAAD/9gAA//b/9v/7AAAAAP/nAAAAAAAA//YAAAAAAAAAAP/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//sAA8AAP/EAAAAD//sAAoACgAAAAoAFAAKAAoAAP/2AAD/7AAAAAr/3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAP/Y/+IACgAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAACgAAAAoABQAUAAoADwAAAAr/4v/Y/9gABf/2//sAAAAAAAAACgAKAAAAAAAAAAoAAAAAAAUACgAF/+cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/n/+wAAAAAAAAAAAAA/9gAAAAA//b/+wAA/9MAAAAFAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAACgAA//YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACv/iAAoAAP+/AAAABf/iAAAAAAAAAAAACgAAAAD/9v/sAAD/2AAAAAD/3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/d/+cABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAoAAAAKAAUABf/7AAX/2P/T/90AAP/x//H/+//7AAAABQAAAAAAAAAAAAAAAAAAAAAAAAAA/+IAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAFABQACv/7//b/+wAFAAAACgAA//sACgAA//EACgAKAAD/+wAAAA//8f/7AAAABQAKAAUACgAKAAUADwAP//sACgAKAAX/+wAKAAUABQAUAA8ADwAPAA8ACv/7AAAAAAAAAAAAAAAAAAAAAAAAAAoACgAFAAUADwAAAAAAAAAPAAAAAAAAAAAAAAAA//YAAAAFAAAAAP/7ABQAAAAAAA8AAAAF//sABQAKAAUAAAAAAAoACgAKAA8ADwAAAAAAAAAAAAUAAAAAAA8ACgAFAAoAAAAPAAoABQAAAAAAAAAAAAAAAAAP//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/O//EAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAUAAAAAAAX/TAAAAAAAAAAAAAAAAAAAAAUABQAUAAUABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/5wAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAABQAAAAAABQAAAAAABf/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAUAAoAAAAUAAAADwAUAB4ACgAAAAoACgAAAAoAFAAUAAAAHgAAAAr/4gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8ADwAUABQACgAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAABQAZAAUAAAAUAAAACv/dAAUAKAAUABkACgAAAAoACgAKAAAAAAAAABQAFAAA//sAAAAAAAAACgAAAB4AAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAACv/2AAoACgAA//sAAP/2AAAACgAAAAoACgAAAAD/9v/2AAD/9gAAAAr/4v/2AAAAAP/2AAAACgAAAAAABQAAAAoACgAAAAr/+//2AAD/+wAPAAAABQAPAAoACgAA//sAAAAFAAr/9v/2AA8AAAAAAAAAAP/x//YACgAF//sAAAAF//YAAAAA//v/+//7//YAAAAAAAAAAP/7AAUAAAAPAAAABf/7AAoAAP/2//YAAP/2//b/+//7AAoACgAAAAAAAAAAAAUAAAAAAAAACgAF//YAAAAK//YAAAAAAAAAAAAAAAAAAP/7//sABQAAAAAAD//sAA8ACv/7//H/+//s//YADwAAAAoACgAA//b/9v/xAAD/8QAAAA//9gAAAAD/9v/2AAAACv/7AAAACv/xAAAACv/7AAr/8f/2AAAAAAAK//EAAAAK//sACv/7//EAAAAAAAD/8f/2AAr/+wAAAAoAAP/x//YADwAAAAAAAAAK//EAAAAA//v/+//7//YABQAFAAAAAP/7AA//+wAAAAAABQAKAAr/+//2//b/9v/7//v/+//7AA8ACgAAAAAAAAAAAAUAAAAAAAoABQAF//EABQAK//b/+wAAAAAAAAAAAAAAAP/2AAAAAAAPAAD/+wAAAAoAAAAAAAAACgAAABQAAAAAAAAACv/7AAAAAAAAAAAAAAAAAAAAKAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAACgAoAAAABQAP//sABf/nAAAAAAAAAAAABf/2//YAAAAAAAAABQAPAAAAeAAAAAAAAAAUAAAAAAAA//b/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAP/s/+f/9gAK//YACv/7/9gADwAK//v/+//i/+L/+wAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAACv/2AAAABQAAAAUACgAKAAAAAAAAAAoAAAAAAAoAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/i/+IAAAAA/+wAAAAA/90AAAAA//b/+//d/9j/+wAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAABf/s//sAAAAAAAAABQAFAAAAAAAAAAUAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAUAAAAAAAAAAAAKABQAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAKABQAAAAAAAAAAAAAAAAAAAAAAAUABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAAAAAAAAAAAAAAKABQAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAKABQAAAAAAAAAAAAAAAAAAAAAAAUARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAA//sAAP/sAAD/5wAKAAoAAP/7/+L/+//x/+IACgAAAAD/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACv/x/+wACv/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/sAAD/+wAAAAAAAP/sAAD/4v/2/+IAAAAAAAAAAAAAAAAAAAAAAAD/8QAAAAAAAAAA/+f/+wAA//EABf/2ABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAAAAAAAAAAAAAAKAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABf/iAAoAAP+6AAAABf/iAAAACgAAAAAABQAAAAD/+//sAAD/2AAAAAD/0wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/T/+IAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAAAP/2AAAAAAAKAAAABf/2AAX/0//J/8T/+//n/+z/9v/2AAAABQAAAAAAAAAAAAAAAAAAAAAAAAAA/93/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAKoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcwAAAAAAAAAAAAAAAAAAAAAAhwAAAAAAAAAAAAAAAAAAAK8ArwCqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACv/xAAoAAP/JAAAAAP/xAAAAAAAAAAAAAAAAAAAAAP/2AAD/4gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/i//EAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/8f/i/+cAAAAA//b/+//7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAP/s/9gAAAAA//YAAP/7/9gAAAAA//b/9v/T/87/9v/7AAAAAAAA//sABQAAAAAAAAAAAAAAAAAAAAAACv/i//sAAAAAAAUACgAAAAAAAAAAAAUAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2//YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP+wAAAAAAAKAA8ABf/7/+IAAAAAAA8AAP/2AA8ADwAAAA8ACv/OAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/7r/2P/OAAoACgAA/9MAAAAA/9gAAP/7AAD/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP+mAAAAAAAAAA8ABf/7/+IAAAAAAAoAAP/2AA8ACv/7AAoAAP/YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/7r/3f/YABQAFAAA/9MAAAAA/+IAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAoAAP/s/9P/8f/7AAoAAP/iAAoACv/7AAoAAP+wAAAAAAAA//b/2AAAAAAAAAAAAAAAAAAAAAD/7P/O/9j/2P/Y/6b/xP+rABQAFAAA/6b/2P/i/7X/9v/dAAD/0wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAUAAAAAP/xAAAAFAAUABQACgAAAAoACgAAABQAFAAKAAAAAAAAAAr/0wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAFAAAAA8AFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAACv/2AAUACgAUAAoAFP/dAAoACgAKAAoACgAAAAoACgAKAAAAAAAAAAAAAAAA//sAAAAAAAAADwAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACv/sAAUAAP/JAAAABf/nAAoACgAAAAAABf/7AAUAAAAAAAD/7AAAAAr/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAP/d/+wACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAABf/7AA8ABQAKAAAACgAAAAr/3f/d/9MAAP/7//YAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAABQAA/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/5wAU/+z/+wAPAAr/7AAUABQAAP/x/+IAAP/i//EADwAFAAAADwAAAA//2P/sAAAABQAU/+L/9gAPAAr/4gAU//H/7AAPAAoAFAAPAAoACv/sABQAD//sABQADwAKAAAAAAAA/+cACgAA//sADwAAAAUADwAPAAUACv/7/+IAAAAFAAoABf/7AAoABQAAAAoABf/dAAr/5wAKAAAAAP/7AAD/9v/J/+cADwAPAA8AAAAAAAD/+wAK/9j/4v/iAAoACgAA/+L/9v/7/+cACgAAAA8AAP/iABQABQAAAAAAAAAAAAAAAAAUAAoAAAAAAAAAAAAFAA8ACv/7//YAAAAKAAoABQAAAAoACgAAAAAABQAAAAD/+wAAAAr/5//7AAAAAAAKAAAABQAAAAAACgAFAAUACgAFAAD/+wAKAAUAAAAPAAUABQAPAAUAD//7//sAAAAFAAX/+wAAAAoAAAAAAAUABQAAAAUACgAAAAAAAAAKAAAAAAAAAAAAAP/7//YAAAAAAAAAAP/7AAoACgAKAAAAAP/7AAoACgAKAAUABQAAAAAAAAAAAAoABQAAAAAAAAAAAAUAAAAAAAUACgAFAAUAAAAKAAAAAAAAAAAAAAAAAAAAAAAK//sABQAAAAAAAP/7AAAAAP/iAAD/+//2AAAAAAAAAAAAAP/2AAAAAAAAAAD/7AAAAAD/9gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/s/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAFAAAAAAAA//v/9v/2//b/+wAAAAAAAAAAAAAAAP/2AAAAAAAA//sAAAAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAAAAAP/7//b/+wAPAAoABQAA//YAAAAA//YACgAAAAD/+wAAAAr/9gAAAAAACgAPAAAAAAAKAAUAAAAPAAAAAAAKAAoAAAAKAAAACgAAAA8ACgAAAAoACv/7AAAAAAAAAAAAAAAKAAAACgAAAAAACgAAAAoACgAAAAAAAAAKAAoAAAAAAAAAAAAA//YAAP/7AAD/+wAAAAAABQAAAAAAAAAA//sAAAAKAAAACgAAAAoADwAP//b/9v/2AAAAAAAA//YAAAAAAAAAAAAAABQAAAAAAAoACgAAAAAAAAAAAAAAAAAP//sAAAAAAAAAAAAAAAAAAP/nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/x//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAKAAAAAP/2AAD/+wAUABQACv/7AAAAAP/7//sAFAAKAAD/9gAAAAr/3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/xAAD/+//7AAoABQAAAAr/+//i//sAAAAKAAAABQAAAAUABQAFAAD/9v/2AAAAAAAA//H/+wAA//sACgAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAP//sAAP/2AAD/+wAUABQACgAAAAAAAP/7//sAFAAKAAD/9gAAAAr/4gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUACgAAAAoADwAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/xAAD/+//7AAoABQAAAAr/+//i//sAAAAKAAoABQAAAAUABQAFAAD/+//2AAAAAAAA//b/+wAA//sACgAAABkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/8f/7//YAAP/nAAD/5wAKAAD/+//2/+L/9v/n/+wAAAAAAAD/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2AAAAAP/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2AAD/+wAAAAAAAP/2AAD/4v/2/9gAAAAAAAD/+wAAAAAAAAAAAAD/8f/nAAAAAAAA/+L/+wAA//YAAP/2AAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/8QAK//YAAP/2AAD/+wAUABQACv/7//EAAP/x//YAFAAKAAD/9gAAAAr/zgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/sAAD/8f/7AAUAAAAAAA//9v+///EAAAAKAAAABQAAAAoABQAFAAD/+//sAAAAAAAA/+z/+wAA//EACv/7AAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/iAAAAAAAAAAoAAAAAAAAAAAAAAAAACgAAAAD/9gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7//YABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAoACv/n/+wAAP/7AAoACgAAAAAACgAAAAAAAAAAAAD/8QAPAAD/2P/sAAAABf/7//sAAAAFAAAAAAAKAAUAAAAAAAr/7AAA//v/9gAKAAoACgAFAAUABf/7AAAAAAAFAAr/9gAFAAoAAAAAAAUAAP/7//YABQAA//EACgAA//YAAAAA//v/+//x/+L/+//7//sAAP/2AAAACgAKAAAAAP/xAAD/+wAA//sACv/2AAAACgAFAAUABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sABQAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAA//sAAAAAAAoABf/O//EACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAFAAAAAAAAAAD/+wAA//sAAAAAAAUAAAAAAAAAAAAA//v/OAAAAAAAAAAAAAAAAAAAAAUACgAUAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/4gAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAD/+wAAAAAABQAAAAAABf/7AAAAAAAAAAD/+wAAAAAAAAAAAAoABQAAAAUACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoABQAKAAoABQAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/s/+wAAAAF/+cACv/2/+IACgAK//b/9v/d/9P/8f/7//EACv/2//YACgAU//YACv/YAAr/9v/2//EACv/x//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+//E/9P/+wAAAAAAAP/7/9P/+wAA/+z/5//x/7AAAAAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+//2/+f/+//2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAUABQACv/7/90AAAAKAA8ABf/7AAUABf/2AAAACv/nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7AAAAAAAF/6b/2P/nAAoACgAK/93/+//7//EACv/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACv/i/+wACgAKAAAACgAK/+IABQAK//v/8f/2/8n/+wAAAAAAAAAAAA8ACgAAAAAAAAAAAAAAAAAAAAAAAP/2//YAAAAAAAoADwAKAAAAAAAFAAoABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACv/x//YAAAAK//YACgAA//EACgAK//v/+//i/+f/+wAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//H/5/+6/93/8f/TAAD/7P/n/8T/0//T/9j/3QAA/8kAAP/xAAAAAAAA/+z/3QAAAAAAAAAAAAAAAAAAAAD/0wAA/9P/5//n/+L/8QAKAAAAbgAA/9gAAAAA/+f/+//iAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//b/9v/E/+z/+//sAAAAAP/7/9P/7P/x//H/9gAA/9MAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//H/8QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+//i/8T/+wAA/+cAAP/x/9MAAAAA//H/+//Y/87/5//7AAAAAAAA//YADwAAAAAAAAAAAAAAAAAAAAAACv/xAAAAAAAAAAAAAAAFAAAAAAAAAAUAAAAAAAX/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAADcANwAyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUACgAAAAAACgAKAAAAAAAK/+IAAAAK//v/+//n/+IAAAAAAAAAAAAAAAoACgAAAAAAAAAAAAAAAAAAAAAACgAAAA8ADwAKAAoADwAAAAAAAAAAAAAAAAAAAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAeABQACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAKAAAACv/2AAAAFAAZAAAAAP/2//v/+//7AAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAABT/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAoACgAAAAAAAAAKAAoAAAAAAAAAAAAA/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAKAAAAAAAAAAAAWgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAoAAAAAAAAAAAAAABQAAAAAABQACgAAAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Y//EAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAKAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/5wAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAA//sAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Y//sABf/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAKAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//YAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP84AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAoADwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAD/+wAAAA8AAP/7AAAAAP/7//sAAAAKAAoAAAAAAAAAAAAAAAAACv/2AAAAAAAAAAAAAAAAAAoAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAP/x/87/9gAA/+wAAP/2/9MAAAAA//H/9v/T/8T/4gAAAAAAAAAA//sACgAAAAAAAAAAAAAAAAAAAAAACv/n//YAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACgAAAAoADwAAAAAAAAAKAAAAAAAA//sAAP/2/+IAAAAFAAAAAAAAAA8ACgAAAAAAAAAAAAAAAAAAAAAACgAAAAoACgAKAAUADwAAAAAAAAAAAAAAAAAAAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAACgAUAAAACgAAAAoAAAAUABQACgAKAAoADwAKAAAACgAAAAAAAAAAAAAAAAAAAAAACgAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2/9MAAAAA//EAAAAA/9gAAAAA//H/7P/T/8n/9v/xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2//sAAAAAAAAAAP/2AAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACgAKAAoACgAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Y//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Y/9j/8QAA/+cAAP/2/9MAAAAA//b/+//Y/9P/8QAAAAAAAAAA//YACgAAAAAAAAAAAAAAAAAAAAAACv/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAX/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Y/+cACv/2AAoAAAAF/87/7P/2/+f/7AAA/7oAAAAPAAAAAAAAAAr/7AAAAAAAAAAAAAAAAAAAAAD/4gAA/9j/8f/xAAUACv/iAAAAKAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAFP/O/+wAFAAFAAAAAAAU/9gAAAAA//H/9v/7/9gACgAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAFAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAP/2//sAAAAAAAAAAAAA//sAAAAA//v/+wAA/+wAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAACgAA//YAAAAAAAoACgAAAAAAPAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAP/d/+z/9gAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAP/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZAAoAAP/xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/3QAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAoACv/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAP/O//EABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAPAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/7AAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAFAAAABQAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAAAAX/+//n/93/9v/2AAoAAP/nAAAAAAAAAAAAAP+6AAAAAAAA//b/4gAAAAAAAAAAAAAAAAAAAAD/4v/d/+L/4v/s/8n/2P+/AAAAAAAA/7X/0//Y/8n/9v/YAAD/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9gAAAAr/9v/s/+IAAP/2AA8AAP/nAAAAAAAAAAAAAAAAAAAAAAAA//EAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/8T/zgAAAAAAAAAAAAAAAAAAAAD/8QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//YAAAAA//YAAAAA//YAAAAA//YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAFAAoABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/T//YABQAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUABQAPAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2AAD/+//7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAAAAD/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoACgAAAAUACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAP/7AAAAAAAAAAoAAP/7AAoACgAAAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//v/9gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAr/+//2AAAAAP/7AAAAAP/2AAoAAAAAAAAAAP/2AAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAD/8QAA/+f/9v/2/+z/5//7AAAAZAAA//b/9gAA//YAAP/2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8AD//2AAAADwAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABf/7//YABQAAAAAAAAAA//EAAAAA//v/+//n/+IACgAAAAAAAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAKAAAAAP/xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP+///EAAP/xAAD/8QAA/8n/7P/x/+f/7AAA/7oAAAAFAAAAAAAAAAX/4gAAAAAAAAAAAAD/xAAA/8T/3f/7/7X/5//iAAAABf/dAAAAAAAA//YAAAAAAAAACv/7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUACgAAAAoACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+//7AAr/+//2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAOAACAAcAHwAiAC4ALwAwADEAMwBEAE8AWgCWAJcAmQC6AMEA4gERARoBGwEcAR8BMQE2AUsBTAFOAU8BUAFRAVUBVgFYAVkBWgFbAV4BYAFhAWIBZQFnAWgBaQFqAYkBmQH9Ag0CDgIPAhYCLwI4Ak4AAgAoAAEACgAAABEAEwAKABUAFwANABkAGwAQAB0AOgATAD0APwAxAEIATwA0AFQAbgBCAHIAdQBdAHcAhABhAIYAkQBvAJUAlwB7AJkAmQB+AJsAmwB/AJ8AoQCAAKQApwCDAKkAvwCHAMEAwwCeAMUAyQChAM4A0wCmAOEA8ACsAPUA+QC8AP0BHgDBASABSADjAUoBXgEMAWABYwEhAWUBbwElAXEBcQEwAXMBcwExAXUBdgEyAXgBfwE0AYIBhAE8AYcBrAE/Aa4BxgFlAc8B0wF+AdgCEwGDAhUCFQG/AhcCPgHAAkACSwHoAk0CTgH0AAEAAQJOAAcAVgAKAC4AEQA3AD4AJAASADgAAAAAAAAAAAAAAAAAKABXAGcAAAAqAFgAcAAAAD8AKgBvAAAAQAAoAHYAHwB2AGUAOQAnADIAFgAcABsAMAAvABYAOQAUABQAVQBIAFQAdwBBAAAAAQACAA0AAwAEAAUAAAAAAAwABgAHAAAAAAANAAgADQAJAAoACwAMAA4ADwAQABEAEgBvAEMAAAAAAAAAAAAmACQAEwAjABUAGgAdACYAIAAhACIAIwAmACYAJAAkACkALQAuADEAMwA0ADUANgA3ADgAbwAAAAAAAAAAAAAAAgADAAAADQAMACYAJgAmACYAJgAmABMAFQAVABUAFQByAAAAcwB0ACYAJAAkACQAJAAkADMAMwAzADMAAAAAAAAAeABeAEUAAABTAAAAOQAAAAAAAAADAA0AeQAAAAAAFQAkAFwASgAAAHEAHgB2AAAAAAANAAMAFQAfAB8AKwAsACsALAAoADcAEQBSAG0AcQAeACAAIwAAAFsAdgB2AAAAAAADAAAAAwADAAAAAAAAAAAADQANAA0ADAAMAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANAEYAAAAAAAAAAgACAAIADQADAAMAAwADAAUABQAFAAAAAAAAAAAADAAGAAcABwAHAAAAAAAAAA0ADQAJAAkACQAKAAoACgAKAAsACwAMAAwADAAMAAwAEgASACYAJgAmABMAEwATACUAFQAVABUAFQAdAB0AHQAmAHUAAABzACIAIwAlACMAJgAmACYAJAAkAC0ALQAtAC4ALgAuAC4AMQAxADMAMwAzADMAMwA4ADgAAAAAAAAAAAAAAAAAAAAAAAAAAAAmABoAIAAjADkAAAA7AFoAagAYAFAATQBjAGAAGAA7ADoAWQBpABcATwBMAGIAXwAXADoARwAAAD0AaABsADwAAABrABkAUQBOAGQAYQAZADwAXQBLAG4AAABuAAAAbgAAAGYARAAAAEIAAAABAAIADQADAAQABQAAAAAADAAGAAcAAAAAAA0ACAANAAkACgALAAwADgAPABAAEQASACYAJAATACMAFQAaAB0AJgAgACEAIgAjACYAJgAkACQAKQAtAC4AMQAzADQANQA2ADcAOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAgACAAIADQADAAMAAwADAAMAAwADAAMABQAFAAUAAAAAAAAAAAAAAAAAAAAAAAwABgAHAAcABwAAAAAAAAAAAA0ADQANAA0ADQANAA0ACQAJAAkACgAKAAoACgAKAAsACwAMAAwADAAMAAwADAAMAAwADAARABEAEgASABIAJgAmACYAJgAmACYAJgAmACYAEwATABMAEwAlABUAFQAVABUAFQAVABUAFQAdAB0AHQAmAHIAcwB0AAAAdQAAAHMAIgAjACUAIwAmACYAJgAmACQAJAAkACQAJAAkACQALQAtAC0ALgAuAC4ALgAuADEAMQAzADMAMwAzADMAMwAzADMAMwA3ADcAOAA4ADgAAAA5ACcAMgAWABwAGwAwAC8AFgA5AHYAdwAAAA0ASQABAAECTgAUAA0AQQBmAEgAWgBuABgASQBqAAAAAAAAAAAAAAAAAFQADgASAG8AVQAkAHcAdAABAFUAAABNAAIAVABTAFIAUwAWAD4AOwBnAD0AXgA5AD4APABOADoATABMAAwACgAVAGkAAwA/AG4ARABuAG4AbgBEAG4AAABdAG4AbgBuAG4ARABuAEQAbgBBAEIAQwBFAEYARwBIAEkAAAAFAE0AAAAAAAAASgBiAGMAYwBjAE8AXwBiAGAAYQBiAGIAZABkAGMAZQBjAGQAZgBYAGgAWwBcAFkAWgBqAAAAAABNAAAAPwA/AEQAbgBuAEQAQwBKAEoASgBKAEoASgBjAGMAYwBjAGMAAAByAHAAcQBkAGMAYwBjAGMAYwBoAGgAaABoAAgAGgB2AAAAAAAHAAAACwAQAAAAEwAAAAAAPwBEAHUANQAmAEoAYwA4AAAAAABQAFEAUwA/AD8ARABEAGMAUgBSAFYAVwBWAFcAVABaAEgAMQAAAFAAUQBPAE8ACQAPAFMAUwB0AD8AbgA/AG4AbgAAAAAAAAAAAEQARABEAEMAQwBDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQABjAD8APwA/AEQARABEAG4AbgBuAG4AbgBEAEQARABuAAAAAAAAAF0AbgBuAG4AbgBuAG4AbgBEAEQAbgBuAG4AQQBBAEEAQQBCAEIAQwBDAEMAQwBDAEkASQBKAEoASgBjAGMAYwBjAGMAYwBjAGMAXwBfAF8AYgBzAAAAcABiAGIAYgBiAGQAZABkAGMAYwBkAGQAZABmAGYAZgBmAFgAWABoAGgAaABoAGgAagBqAG4AbgBuAG4AbgBuAG4AbgBuAG4AQgBPAE8ATwAAABEAbAAlAC0AKgAgAB0AbAAnADAANwBrADMALAApAB8AHABrADYAGwAiAAAAGQAAAAAALwBtADQALgArACEAHgBtACgAMgAjAAAAAAAAAEsAAABLAAAASwAXAAYAAAAEAD8AbgBEAG4AbgBuAEQAbgAAAF0AbgBuAG4AbgBEAG4ARABuAEEAQgBDAEUARgBHAEgASQBKAGIAYwBjAGMATwBfAGIAYABhAGIAYgBkAGQAYwBlAGMAZABmAFgAaABbAFwAWQBaAGoAAAA/AD8APwA/AD8APwA/AD8APwBEAEQARABEAG4AbgBuAG4AbgBuAG4AbgBuAEQARABEAG4AAAAAAAAAAAAAAAAAAABdAG4AbgBuAG4AbgBuAG4AbgBEAEQARABEAEQARABEAG4AbgBuAEEAQQBBAEEAQQBCAEIAQwBDAEMAQwBDAEMAQwBDAEMASABIAEkASQBJAEoASgBKAEoASgBKAEoASgBKAGMAYwBjAGMAYwBjAGMAYwBjAGMAYwBjAGMAXwBfAF8AYgAAAHAAcQByAHMAAABwAGIAYgBiAGIAZABkAGQAZABjAGMAYwBjAGMAYwBjAGQAZABkAGYAZgBmAGYAZgBYAFgAaABoAGgAaABoAGgAaABoAGgAWgBaAGoAagBqAAAAPgA7AGcAPQBeADkAPgA8AE4AOgBTAGkAbwBAAGM="
+    local zekton = function(weight, style) return Font.new("rbxasset://fonts/families/Zekton.json", weight, style) end
+    local burbank
+
+    local function b64decode(s)
+        local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        local map = {}
+        for i = 1, 64 do map[alphabet:byte(i)] = i - 1 end
+        local out = buffer.create(#s * 3 // 4 + 3)
+        local n = 0
+        for i = 1, #s, 4 do
+            local a, b, c, d = s:byte(i, i + 3)
+            local vc, vd = map[c], map[d]
+            local v = map[a] * 262144 + map[b] * 4096 + (vc or 0) * 64 + (vd or 0)
+            buffer.writeu8(out, n, bit32.rshift(v, 16)) n += 1
+            if vc then buffer.writeu8(out, n, bit32.band(bit32.rshift(v, 8), 255)) n += 1 end
+            if vd then buffer.writeu8(out, n, bit32.band(v, 255)) n += 1 end
+        end
+        return buffer.readstring(out, 0, n)
+    end
+
+    local function getBurbank()
+        if burbank then return burbank end
+        local wrf, gca, isf, rdf = K.fn("writefile"), K.fn("getcustomasset") or K.fn("getsynasset"), K.fn("isfile"), K.fn("readfile")
+        local ok, f = pcall(function()
+            assert(wrf and gca, "executor has no writefile/getcustomasset")
+            pcall(function() tbl17.w().ensureStorageDirectories("kiciarebuild/fonts") end)
+            local data = b64decode(BURBANK_B64)
+            local otf, json = "kiciarebuild/fonts/burbank_black.otf", "kiciarebuild/fonts/burbank_black.json"
+            if not (isf and rdf and isf(otf) and #rdf(otf) == #data) then wrf(otf, data) end
+            wrf(json, HttpService:JSONEncode({
+                name = "burbank black",
+                faces = {{name = "Regular", weight = 400, style = "normal", assetId = gca(otf)}},
+            }))
+            return Font.new(gca(json))
+        end)
+        if ok and f then burbank = f
+        else
+            KQ("[DamageText] Burbank font unavailable (" .. tostring(f) .. "), using GothamBlack")
+            burbank = Font.fromEnum(Enum.Font.GothamBlack)
+        end
+        return burbank
+    end
+
+    -- ══════════════════════════ style 1: phantom forces ══════════════════════════
+    local pfTemplate
+    local pfCounter = 0  -- one shared cell: it picks the cycle colour AND is the spiral angle
+
+    local function buildPF()
+        if pfTemplate then return pfTemplate end
+        local part = new("Part", {
+            Name = "DamagePart", Transparency = 1, Anchored = true, CanCollide = false, CanQuery = false,
+            CanTouch = false, CastShadow = false, Material = Enum.Material.SmoothPlastic,
+            TopSurface = Enum.SurfaceType.Smooth, BottomSurface = Enum.SurfaceType.Smooth,
+            Size = Vector3.new(0.2, 0.2, 0.2),
+        })
+        local bb = new("BillboardGui", {
+            Name = "BillboardDamage", ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Active = true,
+            ExtentsOffset = Vector3.new(0, 0.5, 0), LightInfluence = 1, AlwaysOnTop = true,
+            Size = UDim2.new(0, 500, 0, 500), ClipsDescendants = true,
+        }, part)
+        local function label(name, color, pos, z)
+            local l = new("TextLabel", {
+                Name = name, AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.new(0, 20, 0, 20),
+                BorderColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 1, Position = pos,
+                BorderSizePixel = 0, BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+                FontSize = Enum.FontSize.Size28, TextSize = 28, TextColor3 = color, Text = "24",
+            }, bb)
+            if z then l.ZIndex = z end
+            l.FontFace = zekton(Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+            return l
+        end
+        label("TextDamage", Color3.fromRGB(255, 225, 0), UDim2.new(0.5, 0, 0.5, 0), 2)
+        local shadow = label("TextDamageShadow", Color3.fromRGB(67, 67, 67), UDim2.new(0.5, 1, 0.5, 1))
+        new("UIStroke", {Thickness = 3, Color = Color3.fromRGB(52, 52, 52)}, shadow)
+        pfTemplate = part
+        return part
+    end
+
+    local PF_ORIGINAL = {
+        Head = Color3.fromRGB(255, 102, 102),
+        UpperTorso = Color3.fromRGB(255, 150, 0),
+        LowerTorso = Color3.fromRGB(255, 150, 0),
+    }
+    local function pfColor(partName)                       -- proto 4160
+        if cfg("CycleColors", false) then return colorN(pfCounter % 3 + 1) end
+        if cfg("OriginalColors", true) then return PF_ORIGINAL[partName] or Color3.fromRGB(255, 255, 0) end
+        if partName == "Head" then return colorN(1) end
+        if partName == "UpperTorso" then return colorN(2) end
+        return colorN(3)
+    end
+
+    local function phantom(pos, partName, text)            -- proto 4161 + 7081
+        local part = track(buildPF():Clone())
+        part.CFrame = CFrame.new(pos)
+        part.Parent = Workspace
+        local head = partName == "Head"
+        local scale = head and 1.75 or 1
+        local bb = part.BillboardDamage
+        local main, shadow = bb.TextDamage, bb.TextDamageShadow
+        main.Text, shadow.Text = text, text
+        main.TextSize, shadow.TextSize = 20 * scale, 20 * scale
+        bb.Adornee = part
+        bb.Parent = part
+        main.TextColor3 = pfColor(partName)
+        shadow.UIStroke.Thickness = head and 2 or 0.5
+        if head then
+            local f = zekton(Enum.FontWeight.Regular, Enum.FontStyle.Italic)
+            main.FontFace, shadow.FontFace = f, f
+        end
+        -- golden-angle spiral: each popup lands 137.5 degrees round from the previous one
+        local a = 2.399963229728653 * pfCounter
+        pfCounter += 1
+        local target = UDim2.new(0.5, 32 * math.cos(a), 0.5, -48 * math.sin(a) - 90)
+        main:TweenPosition(target, Enum.EasingDirection.Out, Enum.EasingStyle.Quint, 1, true)
+        shadow:TweenPosition(target + UDim2.fromOffset(1, 1), Enum.EasingDirection.Out, Enum.EasingStyle.Quint, 1, true)
+        task.delay(1, function()
+            for i = 1, 10 do
+                if not part.Parent then return end
+                main.TextTransparency, shadow.TextTransparency = i / 10, i / 10
+                task.wait(1 / 60)
+            end
+            part:Destroy()   -- the original only destroys the billboard and leaves the 0.2-stud part behind
+        end)
+    end
+
+    -- ══════════════════════════ style 2: fortnite damage ══════════════════════════
+    local ftBillboard, ftFrame
+    local ftColorIdx = 0
+    local active = {}       -- [character] = {damage, thread, part, offset}   (proto 4155's stacking table)
+    local POP = TweenInfo.new(1.8, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out, 0, false)
+
+    local function buildFT()
+        if ftBillboard then return end
+        ftBillboard = new("BillboardGui", {
+            ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Active = true, LightInfluence = 1, AlwaysOnTop = true,
+            Size = UDim2.new(0, 1000, 0, 1000), ClipsDescendants = true,
+        })
+        new("UIScale", {}, ftBillboard)
+        ftFrame = new("Frame", {
+            AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromScale(0, 0), AnchorPoint = Vector2.new(0.5, 1),
+            BackgroundTransparency = 1, Position = UDim2.new(0.5, 0, 0.5, 0),
+        })
+        new("TextLabel", {
+            AnchorPoint = Vector2.new(0.5, 0.5), AutomaticSize = Enum.AutomaticSize.XY,
+            BorderColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 1, Position = UDim2.new(0.5, 0, 0.5, 0),
+            BorderSizePixel = 0, BackgroundColor3 = Color3.fromRGB(255, 255, 255), FontSize = Enum.FontSize.Size60,
+            TextStrokeTransparency = 0, TextSize = 40, TextColor3 = Color3.fromRGB(242, 255, 0), Text = "9",
+            FontFace = getBurbank(),
+        }, ftFrame)
+    end
+
+    local function ftPopup(part, damage, offset, key, startScale)      -- proto 7079 + 8201
+        local bb = ftBillboard:Clone()
+        bb.Parent, bb.Adornee = part, part
+        local colorIdx = cfg("CycleColors", false) and ftColorIdx or 0
+        local labels, cursor = {}, nil
+        for _, ch in ipairs(tostring(damage):split("")) do
+            colorIdx = colorIdx % 3 + 1
+            local frame = ftFrame:Clone()
+            local lbl = frame.TextLabel
+            lbl.TextColor3 = colorN(colorIdx)
+            lbl.Text = ch
+            frame.Parent = bb
+            lbl.Rotation = math.random(-2, 2)
+            local w = lbl.TextBounds.X
+            cursor = cursor and (cursor + w) or -w
+            frame.Position = frame.Position + offset + UDim2.fromOffset(cursor, 0)
+            table.insert(labels, lbl)
+        end
+        ftColorIdx = colorIdx
+        local ui = bb.UIScale
+        ui.Scale = startScale
+        TweenService:Create(ui, POP, {Scale = 1}):Play()
+        task.wait(0.7 + math.random() * 0.5)
+        for i, lbl in ipairs(labels) do               -- left half flies left, right half flies right
+            local dir = (i / #labels > 0.5) and 1 or -1
+            local p = lbl.Position
+            local pos = Vector2.new(p.X.Offset, p.Y.Offset)
+            local vel = Vector2.new(dir * 75, 0)
+            local t, conn = 0, nil
+            conn = RunService.RenderStepped:Connect(function(dt)
+                if t > 1 or not lbl.Parent then conn:Disconnect() return end
+                vel = Vector2.new(vel.X - vel.X * 0.93 * dt, vel.Y + 130 * dt)   -- drag on x, gravity on y
+                pos = pos + vel * dt
+                lbl.Position = UDim2.new(0.5, pos.X, 0.5, pos.Y)
+                lbl.TextTransparency = t
+                lbl.Rotation = dir * 360 * math.exp(t)
+                t += dt
+            end)
+        end
+        task.wait(1)
+        part:Destroy()
+        if active[key] and active[key].part == part then active[key] = nil end
+    end
+
+    local function fortnite(char, pos, damage)             -- proto 4155
+        buildFT()
+        local stack = cfg("Stack", false)
+        local prev = active[char]
+        local startScale = (stack and prev) and 0.75 or 0   -- a merged popup re-pops from 0.75, a fresh one from 0
+        if prev and stack then
+            prev.part:Destroy()
+            damage += prev.damage
+            pcall(task.cancel, prev.thread)
+        end
+        local part = track(new("Part", {
+            CanCollide = false, CanTouch = false, CanQuery = false, Anchored = true, Transparency = 1,
+        }, Workspace))
+        local offset = stack and prev and prev.offset
+        if not offset then
+            if stack then
+                offset = UDim2.fromOffset(25, -25)
+            else
+                local x = math.random(-30, 30)
+                if x > 0 then x += 30 end
+                offset = UDim2.fromOffset(x, math.random(-30, 30))
+            end
+        end
+        part.Position = pos + Vector3.new(0, 1.75, 0)
+        local thread = task.spawn(ftPopup, part, damage, offset, char, startScale)
+        active[char] = {damage = damage, thread = thread, part = part, offset = offset}
+    end
+
+
+    -- ══════════════════════════ non-text hit effects ══════════════════════════
+    -- slashes (proto 4156), explosion (4157), bubble (4158), clone (4159); colours are the same three
+    -- Color1/2/3 UE calls hit_effects_col_1..3. Each takes the BasePart that was hit.
+    local function heCfg(key, default)
+        local ok, v = pcall(function() return config.Data.PlayerHit.HitEffects[key] end)
+        if ok and v ~= nil then return v end
+        return default
+    end
+
+    -- Effects are spawned IN FRONT of the target: moved from the hit part toward the camera by FrontOffset studs
+    -- (never past the camera), so they are not buried inside the enemy's body.
+    local function frontPos(hitPart)
+        local pos = hitPart.Position
+        local cam = Workspace.CurrentCamera
+        if not cam then return pos end
+        local toCam = cam.CFrame.Position - pos
+        local mag = toCam.Magnitude
+        if mag < 0.01 then return pos end
+        return pos + toCam.Unit * math.min(heCfg("FrontOffset", 2.5), mag)
+    end
+
+    local slashBB, slashImg
+    local function buildSlash()
+        if slashBB then return end
+        slashBB = new("BillboardGui", {
+            ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Active = true, LightInfluence = 1, AlwaysOnTop = true,
+            Size = UDim2.new(0, 250, 0, 250), ClipsDescendants = true, Enabled = true,
+        })
+        new("CanvasGroup", {
+            Size = UDim2.new(1, 0, 1, 0), BorderColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 1,
+            BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+            GroupTransparency = 1, BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        }, slashBB)
+        slashImg = new("ImageLabel", {
+            Size = UDim2.new(0, 30, 0, 30), BorderColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 1,
+            BorderSizePixel = 0, ImageColor3 = Color3.new(1, 1, 1), BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+            Image = "rbxassetid://101352470463799", AnchorPoint = Vector2.new(0.5, 0.5),
+        })
+    end
+
+    local function slashes(hitPart)
+        buildSlash()
+        local bb = slashBB:Clone()
+        local part = track(new("Part", {
+            Anchored = true, Transparency = 1, CanCollide = false, CanTouch = false, CanQuery = false,
+        }, Workspace))
+        part.Position = frontPos(hitPart) + Random.new():NextUnitVector() * 1.5   -- original: hit position + random * 3
+        bb.Adornee = part
+        bb.Parent = part
+        local canvas = bb.CanvasGroup
+        local imgs, base = {}, math.random(0, 360)
+        for i = 1, 3 do                                   -- three slashes fanned 45 degrees apart
+            local img = slashImg:Clone()
+            img.Rotation = base + i * 45
+            img.Parent = canvas
+            img.Position = UDim2.new(0.5, math.random(-5, 5), 0.5, math.random(-5, 5))
+            table.insert(imgs, img)
+            TweenService:Create(img, TweenInfo.new(1.5), {Rotation = img.Rotation + math.random(-10, 10)}):Play()
+        end
+        local t = 1
+        while t > 0 do                                    -- fade in
+            t -= task.wait() * 10
+            canvas.GroupTransparency = t
+        end
+        for i, img in ipairs(imgs) do                     -- slash i tints to colour i
+            TweenService:Create(img, TweenInfo.new(0.5), {ImageColor3 = colorN(i)}):Play()
+        end
+        task.wait(0.5)
+        local g = 0
+        while g < 1 do                                    -- fade out
+            g += task.wait() * 3
+            canvas.GroupTransparency = g
+        end
+        part:Destroy()
+    end
+
+    local function explosion(hitPart)
+        local e = Instance.new("Explosion", Workspace)
+        e.BlastRadius = 0                                 -- visual only
+        e.Position = frontPos(hitPart)
+    end
+
+    local bubbleTpl
+    local function buildBubble()
+        if bubbleTpl then return end
+        bubbleTpl = Instance.new("Attachment")
+        local em = new("ParticleEmitter", {
+            Name = "particle_1", LightEmission = 3, Transparency = NumberSequence.new(0),
+            Color = ColorSequence.new(Color3.new(1, 1, 1)),
+            Size = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 6, 1.2)}),
+            Rotation = NumberRange.new(0), RotSpeed = NumberRange.new(0), Enabled = false, Rate = 2,
+            Lifetime = NumberRange.new(0.25), Speed = NumberRange.new(0.1), Squash = NumberSequence.new(0),
+            ZOffset = 1, Texture = "rbxassetid://2916153928", Orientation = "VelocityPerpendicular",
+            Shape = "Box", ShapeInOut = "Outward", ShapeStyle = "Volume",
+        }, bubbleTpl)
+        local facing = em:Clone()
+        facing.Orientation = "FacingCamera"
+        facing.Parent = bubbleTpl
+    end
+
+    local function bubble(hitPart)
+        buildBubble()
+        local at = bubbleTpl:Clone()
+        at.Parent = hitPart
+        at.WorldPosition = frontPos(hitPart)
+        local seq = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, colorN(1)), ColorSequenceKeypoint.new(0.5, colorN(2)),
+            ColorSequenceKeypoint.new(1, colorN(3)),
+        })
+        for _, em in ipairs(at:GetChildren()) do
+            em.Color = seq
+            em:Emit(1)
+        end
+        task.delay(1, function() at:Destroy() end)
+    end
+
+    local CLONE_PARTS = {"HumanoidRootPart", "RightHand", "LeftLowerArm", "RightLowerArm", "LeftUpperArm", "RightUpperArm",
+        "LowerTorso", "LeftLowerLeg", "LeftUpperLeg", "LeftFoot", "RightFoot", "RightLowerLeg", "RightUpperLeg",
+        "UpperTorso", "LeftHand", "Head"}
+    local cloneBusy = {}
+
+    local function cloneFx(hitPart)
+        local char = hitPart.Parent
+        if not char or cloneBusy[char] then return end
+        local cam = Workspace.CurrentCamera
+        if cam and (hitPart.Position - cam.CFrame.Position).Magnitude > 500 then return end
+        cloneBusy[char] = true
+        local model = track(Instance.new("Model"))
+        model.Parent = char.Parent
+        local clones, color = {}, colorN(1)
+        local material = Enum.Material[heCfg("CloneMaterial", "ForceField")] or Enum.Material.ForceField
+        local kids = char:GetChildren()
+        if char.PrimaryPart then
+            local i = table.find(kids, char.PrimaryPart)
+            if i then table.remove(kids, i) end
+        end
+        local keepAccessories = not heCfg("CloneRemoveAccessories", false)
+        local function ghost(inst, mat)
+            inst.Material = mat
+            inst.CanCollide, inst.CanQuery, inst.Anchored = false, false, true
+            inst.Color = color
+            table.insert(clones, inst)
+        end
+        for _, c in ipairs(kids) do
+            if keepAccessories and c.ClassName == "Accessory" then
+                local a = c:Clone()
+                local h = a:FindFirstChild("Handle")
+                if h and h.Transparency ~= 1 then
+                    h:ClearAllChildren()
+                    a.Parent = model
+                    ghost(h, Enum.Material.ForceField)
+                end
+            elseif table.find(CLONE_PARTS, c.Name) then
+                local p = c:Clone()
+                p:ClearAllChildren()
+                p.Parent = model
+                ghost(p, material)
+            end
+        end
+        task.delay(0.15, function() cloneBusy[char] = false end)
+        task.wait(1)
+        local t = 0
+        while t < 1 do
+            t += RunService.RenderStepped:Wait() * 2
+            for _, p in ipairs(clones) do p.Transparency = t end
+        end
+        table.clear(clones)
+        model:Destroy()
+    end
+
+    local function runFx(name, fn, hitPart)
+        task.spawn(function()
+            local ok, e = pcall(fn, hitPart)
+            if not ok then KQ("[HitEffects] " .. name .. ": " .. tostring(e)) end
+        end)
+    end
+
+    -- hitPart = the BasePart that was hit; force = run all four regardless of the toggles (menu test)
+    function DT.effects(char, hitPart, force)
+        if typeof(hitPart) ~= "Instance" or not hitPart:IsA("BasePart") then
+            local h = typeof(char) == "Instance" and (char:FindFirstChild("UpperTorso") or char:FindFirstChild("Head"))
+            if not h then return end
+            hitPart = h
+        end
+        if force or heCfg("Slashes", false) then runFx("slashes", slashes, hitPart) end
+        if force or heCfg("Explosion", false) then runFx("explosion", explosion, hitPart) end
+        if force or heCfg("Bubble", false) then runFx("bubble", bubble, hitPart) end
+        if force or heCfg("Clone", false) then runFx("clone", cloneFx, hitPart) end
+    end
+
+    function DT.testFx()
+        local lp = game:GetService("Players").LocalPlayer
+        local mine = lp.Character and lp.Character:FindFirstChild("Head")
+        local best, bd
+        for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+            local c = p ~= lp and p.Character
+            local h = c and c:FindFirstChild("UpperTorso")
+            if h and mine then
+                local d = (h.Position - mine.Position).Magnitude
+                if not bd or d < bd then best, bd = c, d end
+            end
+        end
+        best = best or lp.Character
+        if best then DT.effects(best, best:FindFirstChild("UpperTorso") or best:FindFirstChild("Head"), true) end
+    end
+
+    -- ─────────────────────────────── entry point ───────────────────────────────
+    -- char = the victim's Character, damage = number, part = "Head" / "Body", hitPart = the BasePart that was hit
+    function DT.show(char, damage, part, hitPart, force)
+        if force ~= true and cfg("Enabled", false) ~= true then return end
+        if typeof(char) ~= "Instance" or type(damage) ~= "number" then return end
+        local pos
+        if typeof(hitPart) == "Instance" and hitPart:IsA("BasePart") then pos = hitPart.Position end
+        if not pos then
+            local h = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+            pos = h and h.Position
+        end
+        if not pos then return end
+        local isHead = part == "Head"
+        local partName = isHead and "Head" or ((typeof(hitPart) == "Instance" and hitPart.Name or "UpperTorso"):gsub("^Hitbox", ""))
+        if not isHead and not PF_ORIGINAL[partName] then partName = "UpperTorso" end
+        local style = cfg("Style", "Phantom Forces")
+        if style == "Fortnite" then
+            task.spawn(function() local ok, e = pcall(fortnite, char, pos, damage) if not ok then KQ("[DamageText] " .. tostring(e)) end end)
+        else
+            local ok, e = pcall(phantom, pos, partName, tostring(damage))
+            if not ok then KQ("[DamageText] " .. tostring(e)) end
+        end
+    end
+
+    -- a test popup on the nearest other player, used by the menu button
+    function DT.test()
+        local lp = game:GetService("Players").LocalPlayer
+        local mine = lp.Character and lp.Character:FindFirstChild("Head")
+        local best, bd
+        for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+            local c = p ~= lp and p.Character
+            local h = c and c:FindFirstChild("Head")
+            if h and mine then
+                local d = (h.Position - mine.Position).Magnitude
+                if not bd or d < bd then best, bd = c, d end
+            end
+        end
+        best = best or lp.Character
+        if not best then return end
+        local head = best:FindFirstChild("Head")
+        local torso = best:FindFirstChild("UpperTorso") or best:FindFirstChild("Torso") or head
+        DT.show(best, 100, "Head", head, true)
+        task.wait(0.3)
+        DT.show(best, 24, "Body", torso, true)
+    end
+
+    function DT.clear()
+        for p in pairs(live) do pcall(function() p:Destroy() end) end
+        table.clear(live)
+        table.clear(active)
+        table.clear(cloneBusy)
+    end
+    K.onUnload(DT.clear)
+    return DT
+end
+
+tbl17.hDT = function()
+local c = tbl17.cache.hDT
+
+if not c then
+c = { c = fn35() }
+tbl17.cache.hDT = c
 end
 
 return c.c
@@ -72743,7 +73422,7 @@ return h6.c
 end
 end
 do -- h7
-local function fn35() tbl17 .aF(); tbl17 .aE();local I,W,N,P,a= tbl17 .dX(), tbl17 .h5(), tbl17 .h6(), tbl17 .h3(), tbl17 .a7();local function l(e,c)N(e,"Enable Aimbot",{"Always","Toggle","Hold"},{"Aimbot"},true);local N,E=c.Options,c.Labels;e:AddMultiDropdown({Label="Activation Rules",Options=P(N),Default=I(a(N)),Config={"Aimbot","ActivationConditions"},Labels=E});e:AddSlider({Label="Reaction Delay (s)",Min=0,Max=2,Step=0.01,Config={"Aimbot","ReactionTime"}});e:AddSlider({Label="Switch Delay (s)",Min=0,Max=2,Step=0.01,Config={"Aimbot","SwitchDelay"}});c={"Lock","Linear","Spring"};table.insert(c,3,"AI");E=e:AddDropdown({Label="Aim Mode",Options=c,Config={"Aimbot","Mode","Type"}});e:AddGroup({Source=E,Option="Linear"}):AddSlider({Label="Linear Speed",Min=0.01,Max=1,Step=0.01,Config={"Aimbot","Mode","Speed"}});e:AddGroup({Source=E,Option="AI"}):AddSlider({Label="AI Speed",Min=0.01,Max=1,Step=0.01,Config={"Aimbot","Mode","Speed"}});e:AddGroup({Source=E,Option="Spring"}):AddSlider({Label="Spring Speed",Min=0.01,Max=1,Step=0.01,Config={"Aimbot","Mode","Speed"}});e:AddToggle({Label="Attack Monsters",Height=24,Tooltip="Also aim at the tower monsters (Aimbot and Silent Aim both).",Config={"Aimbot","TargetMonsters"}});end;local function I(N)local P=N:AddToggle({Label="Enable Target Lock",Config={"Aimbot","TargetLock","Enabled"}});local a=N:AddKeybind({Row=P.Row,Modes={"Tap"},Default={Key="None",Mode="Tap"},InKeybindList=true,ListLabel="Target Lock",ConfigMap={Key={"Aimbot","TargetLock","Bind"},ShowInList={"Aimbot","TargetLock","BindShowInList"},Invisible={"Aimbot","TargetLock","BindInvisible"}}});a:SetFeatureEnabled(P.Value==true);P:Connect(P.ValueChanged,function(e)a:SetFeatureEnabled(e==true);end);N:AddGroup({Source=P}):AddDropdown({Label="Lock Mode",Options={"ToggleLock","AutoLock","ManualOnly"},Labels={ToggleLock="Toggle Lock",AutoLock="Auto Lock",ManualOnly="Manual Only"},Config={"Aimbot","TargetLock","Mode"}});end;return function(N,P)local a,e=N:AddSection({Title="Activation",Side="left"}),N:AddSection({Title="Target Lock",Side="right"});if P.PinHint~=nil then a:AddLabel({Label=P.PinHint});end;l(a,P.ActivationConditions);I(e);return W(N,"Aimbot",P);end;end
+local function fn35() tbl17 .aF(); tbl17 .aE();local I,W,N,P,a= tbl17 .dX(), tbl17 .h5(), tbl17 .h6(), tbl17 .h3(), tbl17 .a7();local function l(e,c)N(e,"Enable Aimbot",{"Always","Toggle","Hold"},{"Aimbot"},true);local N,E=c.Options,c.Labels;e:AddMultiDropdown({Label="Activation Rules",Options=P(N),Default=I(a(N)),Config={"Aimbot","ActivationConditions"},Labels=E});e:AddSlider({Label="Reaction Delay (s)",Min=0,Max=2,Step=0.01,Config={"Aimbot","ReactionTime"}});e:AddSlider({Label="Switch Delay (s)",Min=0,Max=2,Step=0.01,Config={"Aimbot","SwitchDelay"}});e:AddDropdown({Label="Priority",Options={"ClosestToCrosshair","ClosestDistance","LowestHealth"},Labels={ClosestToCrosshair="Closest To Crosshair",ClosestDistance="Closest Distance",LowestHealth="Lowest Health"},Config={"Aimbot","Priority"}});c={"Lock","Linear","Spring"};table.insert(c,3,"AI");E=e:AddDropdown({Label="Aim Mode",Options=c,Config={"Aimbot","Mode","Type"}});local LG=e:AddGroup({Source=E,Option="Linear"});LG:AddSlider({Label="Linear Speed",Min=0.01,Max=1,Step=0.01,Config={"Aimbot","Mode","Speed"}});LG:AddSlider({Label="Smoothing (%)",Min=0,Max=100,Step=1,Tooltip="Slows the pull: 0 = full Linear Speed, 100 = almost no pull.",Config={"Aimbot","Mode","SmoothPct"}});LG:AddDropdown({Label="Curve Preset",Options={"Constant","Linear","EaseIn","EaseOut","SCurve"},Labels={Constant="Constant",Linear="Linear",EaseIn="Ease In",EaseOut="Ease Out",SCurve="S-Curve"},Config={"Aimbot","Mode","Curve"}});e:AddGroup({Source=E,Option="AI"}):AddSlider({Label="AI Speed",Min=0.01,Max=1,Step=0.01,Config={"Aimbot","Mode","Speed"}});e:AddGroup({Source=E,Option="Spring"}):AddSlider({Label="Spring Speed",Min=0.01,Max=1,Step=0.01,Config={"Aimbot","Mode","Speed"}});e:AddToggle({Label="Attack Monsters",Height=24,Tooltip="Also aim at the tower monsters (Aimbot and Silent Aim both).",Config={"Aimbot","TargetMonsters"}});end;local function I(N)local P=N:AddToggle({Label="Enable Target Lock",Config={"Aimbot","TargetLock","Enabled"}});local a=N:AddKeybind({Row=P.Row,Modes={"Tap"},Default={Key="None",Mode="Tap"},InKeybindList=true,ListLabel="Target Lock",ConfigMap={Key={"Aimbot","TargetLock","Bind"},ShowInList={"Aimbot","TargetLock","BindShowInList"},Invisible={"Aimbot","TargetLock","BindInvisible"}}});a:SetFeatureEnabled(P.Value==true);P:Connect(P.ValueChanged,function(e)a:SetFeatureEnabled(e==true);end);N:AddGroup({Source=P}):AddDropdown({Label="Lock Mode",Options={"ToggleLock","AutoLock","ManualOnly"},Labels={ToggleLock="Toggle Lock",AutoLock="Auto Lock",ManualOnly="Manual Only"},Config={"Aimbot","TargetLock","Mode"}});end;return function(N,P)local a,e=N:AddSection({Title="Activation",Side="left"}),N:AddSection({Title="Target Lock",Side="right"});if P.PinHint~=nil then a:AddLabel({Label=P.PinHint});end;l(a,P.ActivationConditions);I(e);return W(N,"Aimbot",P);end;end
 
 tbl17.h7 = function()
 local h7 = tbl17.cache.h7
@@ -72816,7 +73495,7 @@ return ib.c
 end
 end
 do -- ic
-local function fn35()local I= tbl17 .a8(); tbl17 .aE(); tbl17 .hN();return function(l,W,N)local P=W:AddSection({Title="Hit Feedback",Side="left"});P:AddToggle({Label="Enable Hit Feedback",Config={"PlayerHit","Enabled"}});P:AddDivider({Label="Sound"});local a,e=P:AddGroup({Source=P:AddToggle({Label="Play Hit Sound",Config={"PlayerHit","Sound","Enabled"}})}),l.SfxSoundStorage:GetNames();local c=a:AddDropdown({Label="Headshot Sound",Options=e,Config={"PlayerHit","Sound","HeadName"}});c:Connect(l.SfxSoundStorage.Changed,function(E)c:SetOptions(E);end);a:AddSlider({Label="Headshot Volume",Min=0.1,Max=10,Step=0.1,Config={"PlayerHit","Sound","HeadVolume"}});a:AddSlider({Label="Headshot Pitch",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","Sound","HeadPitch"}});local c=a:AddDropdown({Label="Body Hit Sound",Options=e,Config={"PlayerHit","Sound","BodyName"}});c:Connect(l.SfxSoundStorage.Changed,function(e)c:SetOptions(e);end);a:AddSlider({Label="Body Hit Volume",Min=0.1,Max=10,Step=0.1,Config={"PlayerHit","Sound","BodyVolume"}});a:AddSlider({Label="Body Hit Pitch",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","Sound","BodyPitch"}});a:AddToggle({Label="Mute Game Hit Sound",Config={"PlayerHit","Sound","DisableGameSound"}});a:AddButton({Label="Manage Custom Sounds",OnClick=N});P:AddDivider({Label="Visual Chams"});l=P:AddToggle({Label="Enable Hit Chams",Config={"PlayerHit","Chams","Enabled"}});P:AddColor({Row=l.Row,Alpha=true,Config={"PlayerHit","Chams","Color"},Transparency={"PlayerHit","Chams","Transparency"},Animatable=true});N=P:AddGroup({Source=l});N:AddSlider({Label="Hit Chams Duration",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","Chams","Duration"}});N:AddDropdown({Label="Hit Chams Material",Options=I.Names,Config={"PlayerHit","Chams","Material"}});P:AddDivider({Label="Flash"});W=P:AddToggle({Label="Enable Hit Flash",Config={"PlayerHit","HitFlash","Enabled"}});P:AddColor({Row=W.Row,Config={"PlayerHit","HitFlash","Color"},Animatable=true});P:AddGroup({Source=W}):AddSlider({Label="Hit Flash Duration",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","HitFlash","Duration"}});P:AddDivider({Label="Notification"});P:AddGroup({Source=P:AddToggle({Label="Enable Hit Notification",Config={"PlayerHit","Notification","Enabled"}})}):AddTextBox({Label="Hit Notification Text",Config={"PlayerHit","Notification","Text"}});end;end
+local function fn35()local I= tbl17 .a8(); tbl17 .aE(); tbl17 .hN();return function(l,W,N)local P=W:AddSection({Title="Hit Feedback",Side="left"});P:AddDivider({Label="Damage Text"});P:AddToggle({Label="Hide Game Damage Numbers",Tooltip="Blocks the game's own floating damage numbers (and anything else it does on that event), like Unnamed Enhancements. Works with or without Damage Text.",Config={"PlayerHit","DamageText","HideGame"}});local DX=P:AddToggle({Label="Enable Damage Text",Tooltip="Floating damage numbers on the enemy: Phantom Forces (Zekton) or Fortnite (Burbank, per-letter pop). Restored from Unnamed Enhancements.",Config={"PlayerHit","DamageText","Enabled"}});local DY=P:AddGroup({Source=DX});DY:AddDropdown({Label="Damage Text Style",Options={"Phantom Forces","Fortnite"},Config={"PlayerHit","DamageText","Style"}});DY:AddToggle({Label="Cycle Colors",Config={"PlayerHit","DamageText","CycleColors"}});DY:AddToggle({Label="Original Colors (Phantom Forces)",Config={"PlayerHit","DamageText","OriginalColors"}});DY:AddToggle({Label="Stack Damage Together (Fortnite)",Config={"PlayerHit","DamageText","Stack"}});DY:AddButton({Label="Test Popup",OnClick=function() task.spawn(function() pcall(function() tbl17.hDT().test() end) end) end});P:AddColor({Row=P:AddLabel({Label="Color 1 (head / slash 1 / clone)"}).Row,Config={"PlayerHit","DamageText","Color1"},Animatable=true});P:AddColor({Row=P:AddLabel({Label="Color 2 (torso / slash 2)"}).Row,Config={"PlayerHit","DamageText","Color2"},Animatable=true});P:AddColor({Row=P:AddLabel({Label="Color 3 (other / slash 3)"}).Row,Config={"PlayerHit","DamageText","Color3"},Animatable=true});P:AddDivider({Label="Hit Effects"});P:AddSlider({Label="Effect Distance In Front (studs)",Min=0,Max=10,Step=0.5,Config={"PlayerHit","HitEffects","FrontOffset"}});P:AddToggle({Label="Slashes",Config={"PlayerHit","HitEffects","Slashes"}});P:AddToggle({Label="Explosion",Config={"PlayerHit","HitEffects","Explosion"}});P:AddToggle({Label="Bubble",Config={"PlayerHit","HitEffects","Bubble"}});local DZ=P:AddToggle({Label="Clone",Tooltip="A fading ghost copy of the enemy where you hit it",Config={"PlayerHit","HitEffects","Clone"}});local DW=P:AddGroup({Source=DZ});DW:AddDropdown({Label="Clone Material",Options={"ForceField","Neon","Glass","SmoothPlastic","Plastic","Metal","Foil","Ice","Marble"},Config={"PlayerHit","HitEffects","CloneMaterial"}});DW:AddToggle({Label="Remove Accessories From Clone",Config={"PlayerHit","HitEffects","CloneRemoveAccessories"}});P:AddButton({Label="Test Hit Effects",OnClick=function() task.spawn(function() pcall(function() tbl17.hDT().testFx() end) end) end});P:AddDivider({Label="Hit Feedback"});P:AddToggle({Label="Enable Hit Feedback",Config={"PlayerHit","Enabled"}});P:AddDivider({Label="Sound"});local a,e=P:AddGroup({Source=P:AddToggle({Label="Play Hit Sound",Config={"PlayerHit","Sound","Enabled"}})}),l.SfxSoundStorage:GetNames();local c=a:AddDropdown({Label="Headshot Sound",Options=e,Config={"PlayerHit","Sound","HeadName"}});c:Connect(l.SfxSoundStorage.Changed,function(E)c:SetOptions(E);end);a:AddSlider({Label="Headshot Volume",Min=0.1,Max=10,Step=0.1,Config={"PlayerHit","Sound","HeadVolume"}});a:AddSlider({Label="Headshot Pitch",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","Sound","HeadPitch"}});local c=a:AddDropdown({Label="Body Hit Sound",Options=e,Config={"PlayerHit","Sound","BodyName"}});c:Connect(l.SfxSoundStorage.Changed,function(e)c:SetOptions(e);end);a:AddSlider({Label="Body Hit Volume",Min=0.1,Max=10,Step=0.1,Config={"PlayerHit","Sound","BodyVolume"}});a:AddSlider({Label="Body Hit Pitch",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","Sound","BodyPitch"}});a:AddToggle({Label="Mute Game Hit Sound",Config={"PlayerHit","Sound","DisableGameSound"}});a:AddButton({Label="Manage Custom Sounds",OnClick=N});P:AddDivider({Label="Visual Chams"});l=P:AddToggle({Label="Enable Hit Chams",Config={"PlayerHit","Chams","Enabled"}});P:AddColor({Row=l.Row,Alpha=true,Config={"PlayerHit","Chams","Color"},Transparency={"PlayerHit","Chams","Transparency"},Animatable=true});N=P:AddGroup({Source=l});N:AddSlider({Label="Hit Chams Duration",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","Chams","Duration"}});N:AddDropdown({Label="Hit Chams Material",Options=I.Names,Config={"PlayerHit","Chams","Material"}});P:AddDivider({Label="Flash"});W=P:AddToggle({Label="Enable Hit Flash",Config={"PlayerHit","HitFlash","Enabled"}});P:AddColor({Row=W.Row,Config={"PlayerHit","HitFlash","Color"},Animatable=true});P:AddGroup({Source=W}):AddSlider({Label="Hit Flash Duration",Min=0.1,Max=3,Step=0.1,Config={"PlayerHit","HitFlash","Duration"}});P:AddDivider({Label="Notification"});P:AddGroup({Source=P:AddToggle({Label="Enable Hit Notification",Config={"PlayerHit","Notification","Enabled"}})}):AddTextBox({Label="Hit Notification Text",Config={"PlayerHit","Notification","Text"}});end;end
 
 tbl17.ic = function()
 local ic = tbl17.cache.ic
@@ -72888,7 +73567,7 @@ return ii.c
 end
 end
 do -- ij
-local function fn35()local I,W,N,P= tbl17 .aU(), tbl17 .gR(), tbl17 .aW(), tbl17 .aY(); tbl17 .aE(); tbl17 .hN();local a,e,c,E,p,T,t,x,S= tbl17 .h0(), tbl17 .h7(), tbl17 .h8(), tbl17 .h9(), tbl17 .ia(), tbl17 .ib(), tbl17 .ic(), tbl17 .id(),{Combat="rbxassetid://99199363807265",CameraAim="rbxassetid://83752373575368",SilentAim="rbxassetid://109514269737059",FireAssist="rbxassetid://81854854241463",WeaponHandling="rbxassetid://128279962545721",HitFeedback="rbxassetid://140427675871522",Ragebot="rbxassetid://125012650497883"};return function(J,B)local X=B:AddTab({Label="Combat",Icon=S.Combat,Description="Aim assistance, fire control, weapon handling, feedback, and ragebot."});local H=X:AddTab({Label="Aimbot",Icon=S.CameraAim,Description="Camera-based aim assistance and target locking."});local k,D=H:Grid({Columns=2}),table.clone(I.BuildSpec);D.PinHint="Hold a weapon, then click the pin next to a setting to give that weapon its own value.";a(J.StoreProfiles,e(k,D));D,k=X:AddTab({Label="Silent Aim",Icon=S.SilentAim,Description="Redirect projectiles toward targets without moving the camera."}):Grid({Columns=2}),table.clone(N.BuildSpec);k.PinHint="Hold a weapon, then click the pin next to a setting to give that weapon its own value.";a(J.StoreProfiles,E(D,k));k=X:AddTab({Label="Ragebot",Icon=S.Ragebot,Description="Aggressive targeting, weapon priority, and evasive movement."}):Grid({Columns=2});do local okRage,errRage=pcall(function() tbl17 .ih()(k);end);if not okRage then warn("[Kicia Rebuild] Ragebot tab failed to build: "..tostring(errRage));end;end;D,k=X:AddTab({Label="Fire Assist",Icon=S.FireAssist,Description="Automatic firing and fast camera flicks."}):Grid({Columns=2}),table.clone(P.BuildSpec);k.PinHint="Hold a weapon, then click the pin next to a setting to give that weapon its own value.";a(J.StoreProfiles,p(D,k)); tbl17 .ii()(D,function()H:Open();end);x((X:AddTab({Label="Weapon Handling",Icon=S.WeaponHandling,Description="Aim, firing, cooldown, melee, and grenade behavior."}):Grid({Columns=2})));D,k=X:AddTab({Label="Hit Feedback",Icon=S.HitFeedback,Description="Sound, visual, flash, and notification feedback."}):Grid({Columns=2}),c(B,J.SfxSoundStorage);t(J,D,k);T(J,D,k);end;end
+local function fn35()local I,W,N,P= tbl17 .aU(), tbl17 .gR(), tbl17 .aW(), tbl17 .aY(); tbl17 .aE(); tbl17 .hN();local a,e,c,E,p,T,t,x,S= tbl17 .h0(), tbl17 .h7(), tbl17 .h8(), tbl17 .h9(), tbl17 .ia(), tbl17 .ib(), tbl17 .ic(), tbl17 .id(),{Combat="rbxassetid://99199363807265",CameraAim="rbxassetid://83752373575368",SilentAim="rbxassetid://109514269737059",FireAssist="rbxassetid://81854854241463",WeaponHandling="rbxassetid://128279962545721",HitFeedback="rbxassetid://140427675871522",Ragebot="rbxassetid://125012650497883"};return function(J,B)local X=B:AddTab({Label="Combat",Icon=S.Combat,Description="Aim assistance, fire control, weapon handling, feedback, and ragebot."});local H=X:AddTab({Label="Aimbot",Icon=S.CameraAim,Description="Camera-based aim assistance and target locking."});local k,D=H:Grid({Columns=2}),table.clone(I.BuildSpec);D.PinHint="Hold a weapon, then click the pin next to a setting to give that weapon its own value.";a(J.StoreProfiles,e(k,D));D,k=X:AddTab({Label="Silent Aim",Icon=S.SilentAim,Description="Redirect projectiles toward targets without moving the camera."}):Grid({Columns=2}),table.clone(N.BuildSpec);k.PinHint="Hold a weapon, then click the pin next to a setting to give that weapon its own value.";a(J.StoreProfiles,E(D,k));k=X:AddTab({Label="Ragebot",Icon=S.Ragebot,Description="Aggressive targeting, weapon priority, and evasive movement."}):Grid({Columns=2});do local okRage,errRage=pcall(function() tbl17 .ih()(k);end);if not okRage then KQ("[Kicia Rebuild] Ragebot tab failed to build: "..tostring(errRage));end;end;D,k=X:AddTab({Label="Fire Assist",Icon=S.FireAssist,Description="Automatic firing and fast camera flicks."}):Grid({Columns=2}),table.clone(P.BuildSpec);k.PinHint="Hold a weapon, then click the pin next to a setting to give that weapon its own value.";a(J.StoreProfiles,p(D,k)); tbl17 .ii()(D,function()H:Open();end);x((X:AddTab({Label="Weapon Handling",Icon=S.WeaponHandling,Description="Aim, firing, cooldown, melee, and grenade behavior."}):Grid({Columns=2})));D,k=X:AddTab({Label="Hit Feedback",Icon=S.HitFeedback,Description="Sound, visual, flash, and notification feedback."}):Grid({Columns=2}),c(B,J.SfxSoundStorage);t(J,D,k);T(J,D,k);end;end
 
 tbl17.ij = function()
 local ij = tbl17.cache.ij
@@ -73605,7 +74284,7 @@ return il.c
 end
 end
 do -- im
-local function fn35() tbl17 .aL(); tbl17 .aE(); tbl17 .hN();local I,W= tbl17 .e1(), tbl17 .dY();return function(l,N,P)local a,e,c=N:AddSection({Title="Cosmetic Runtime",Side="left"}),N:AddSection({Title="Unlock All",Side="left"}),N:AddSection({Title="Community",Side="right"});local E,p,T=a:AddToggle({Label="Enable Cosmetic Changes",OnChanged=function(t)l.CosmeticsConfig:SetRuntimeEnabled(t);P();end}),a:AddLabel({Label="Cosmetic features are paused until cosmetic changes are enabled.",TextColor=Color3.fromRGB(255,190,90)}),a:AddToggle({Label="Use Custom Loadout",Tooltip="Applies the choices from the Skins, Wraps, Charms, and Finishers catalogs.",OnChanged=function(t)l.Cosmetics:SetSkinChangerEnabled(t);P();end});a:AddButton({Label="Reroll Random Cosmetics",OnClick=function()l.Cosmetics:RerollAll();end});local a,t,x=e:AddToggle({Label="Unlock All Cosmetics",OnChanged=function(S)l.Cosmetics:SetUnlockerEnabled(S);end}),e:AddMultiDropdown({Label="Cosmetic Types to Unlock",Options=W.All,Search=true,OnChanged=function(W)l.CosmeticsConfig:SetUnlockedTypes(W);end}),e:AddMultiDropdown({Label="Cosmetic Rarities to Unlock",Options=I,Search=true,Default={Legendary=true,Mythical=true,Unobtainable=true},OnChanged=function(I)l.CosmeticsConfig:SetUnlockedRarities(I);end});c:AddToggle({Label="Share Skins",Config={"UserServer","ShareSkins"}});c:AddToggle({Label="Show Active Cosmetics",Config={"UserServer","ShowActive"}});if K.UESkins then local ok,err=pcall(K.UESkins.BuildUI,l,N,P,E,T);if not ok then warn("[Kicia Rebuild] UE skin changer UI failed: "..tostring(err)) end end;local function I(W)E:Set(W.RuntimeEnabled,true);T:Set(W.SkinChangerEnabled,true);a:Set(W.UnlockerEnabled,true);p:SetVisible(not W.RuntimeEnabled);t:Set(W.Types,true);x:Set(W.Rarities,true);P();end;E:OnChanged(function(W)p:SetVisible(not W);end);E:Connect(l.CosmeticsConfig.StateConfigLoaded,I);N=l.CosmeticsConfig:GetStateConfigState();I(N);l.CosmeticsConfig:SetUnlockedTypes(N.Types);l.CosmeticsConfig:SetUnlockedRarities(N.Rarities);end;end
+local function fn35() tbl17 .aL(); tbl17 .aE(); tbl17 .hN();local I,W= tbl17 .e1(), tbl17 .dY();return function(l,N,P)local a,e,c=N:AddSection({Title="Cosmetic Runtime",Side="left"}),N:AddSection({Title="Unlock All",Side="left"}),N:AddSection({Title="Community",Side="right"});local E,p,T=a:AddToggle({Label="Enable Cosmetic Changes",OnChanged=function(t)l.CosmeticsConfig:SetRuntimeEnabled(t);P();end}),a:AddLabel({Label="Cosmetic features are paused until cosmetic changes are enabled.",TextColor=Color3.fromRGB(255,190,90)}),a:AddToggle({Label="Use Custom Loadout",Tooltip="Applies the choices from the Skins, Wraps, Charms, and Finishers catalogs.",OnChanged=function(t)l.Cosmetics:SetSkinChangerEnabled(t);P();end});a:AddButton({Label="Reroll Random Cosmetics",OnClick=function()l.Cosmetics:RerollAll();end});local a,t,x=e:AddToggle({Label="Unlock All Cosmetics",OnChanged=function(S)l.Cosmetics:SetUnlockerEnabled(S);end}),e:AddMultiDropdown({Label="Cosmetic Types to Unlock",Options=W.All,Search=true,OnChanged=function(W)l.CosmeticsConfig:SetUnlockedTypes(W);end}),e:AddMultiDropdown({Label="Cosmetic Rarities to Unlock",Options=I,Search=true,Default={Legendary=true,Mythical=true,Unobtainable=true},OnChanged=function(I)l.CosmeticsConfig:SetUnlockedRarities(I);end});c:AddToggle({Label="Share Skins",Config={"UserServer","ShareSkins"}});c:AddToggle({Label="Show Active Cosmetics",Config={"UserServer","ShowActive"}});local function I(W)E:Set(W.RuntimeEnabled,true);T:Set(W.SkinChangerEnabled,true);a:Set(W.UnlockerEnabled,true);p:SetVisible(not W.RuntimeEnabled);t:Set(W.Types,true);x:Set(W.Rarities,true);P();end;E:OnChanged(function(W)p:SetVisible(not W);end);E:Connect(l.CosmeticsConfig.StateConfigLoaded,I);N=l.CosmeticsConfig:GetStateConfigState();I(N);l.CosmeticsConfig:SetUnlockedTypes(N.Types);l.CosmeticsConfig:SetUnlockedRarities(N.Rarities);end;end
 
 tbl17.im = function()
 local im = tbl17.cache.im
@@ -74344,6 +75023,7 @@ if current~=nil then local old=current; current=nil; pcall(function() e:Remove(o
 end
 local function build(mode)
 local MenuClass=W.Menu
+if mode~="Classic" and K.LoadAltUI~=nil then K.LoadAltUI() end
 if mode=="Starlight" and K.StarUI~=nil then MenuClass=K.StarUI.Menu end
 if mode=="Lite" and K.SetsunaUI~=nil then MenuClass=K.SetsunaUI.Lite end
 if mode=="Setsuna" and K.SetsunaUI~=nil then MenuClass=K.SetsunaUI.Menu end
@@ -76127,6 +76807,7 @@ end
 end
 do -- MT
 local function fn35()
+K.Mark("monster targets")
 --==========================================================================
 --  MT: monster targets
 --
@@ -78560,6 +79241,7 @@ end
 return jn.c
 end
 end
+K.Mark("target hud")
 --==========================================================================
 --  Target HUD: the target card from Unnamed Enhancements (4 item slots, name,
 --  stat chips, health bar) on Kicia's theme colours. It shows the Ragebot's
@@ -78838,7 +79520,7 @@ K.TargetHudRoot = result.root
 if K.TargetHudRegister ~= nil then pcall(K.TargetHudRegister, result.root) end
 else
 hud = false
-warn("[Kicia TargetHud] could not build the card: " .. tostring(result))
+KQ("[Kicia TargetHud] could not build the card: " .. tostring(result))
 end
 return hud or nil
 end
@@ -78994,14 +79676,14 @@ end
 -- the ragebot calls Hide / Update every frame while its controller runs; with nobody calling (no controller yet,
 -- ragebot switched off further up) this keeps the card going on its own
 local lastCall = 0
-local standalone = game:GetService("RunService").Heartbeat:Connect(function()
+local standalone = game:GetService("RunService").Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 if os.clock() - lastCall < 0.25 then return end
 if alwaysShow() then
 pcall(updateCard, fallbackTarget(), true)
 else
 hide()
 end
-end)
+end))
 K.onUnload(function() standalone:Disconnect() end)
 
 return {
@@ -81700,7 +82382,7 @@ end
 -- Restore the teleported root before the frame is drawn so our view never
 -- shows the jump (the shot already reached the server on Heartbeat).
 local RAGE_RESTORE = PREFIX .. "RageRestore"
-local function rageRestoreRoot()
+local rageRestoreRoot = LPH_NO_VIRTUALIZE(function()
 	-- Release the physics-root glue first so restoring the CFrame sticks. With Hub-style glue
 	-- (Other hub mode) it stays bound like in the other hub (it never unbinds); it is released
 	-- by rageGlueReleaseAll, and re-set on every attacking frame.
@@ -81746,7 +82428,7 @@ local function rageRestoreRoot()
 			rage._lastRealCF = root.CFrame
 		end
 	end
-end
+end)
 -- The RenderStepped hook has a switch (Ragebot > "RenderStepped restore").
 function rage.setRenderRestore(on)
 	pcall(function()
@@ -82089,7 +82771,7 @@ end
 
 local active = false
 local syncAt = 0
-local carefulHeartbeat = RunService.Heartbeat:Connect(function(dt)
+local carefulHeartbeat = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function(dt)
 local want = tbl17.ragebotKeyOn == true and K.RagebotStyle(config.Data.Ragebot.KnifeMode) == "Careful" and not K.UndergroundActive()
 if want ~= active then
 active = want
@@ -82124,7 +82806,7 @@ syncAt = now
 syncSettings()
 end
 rageHeartbeatStep(dt)
-end)
+end))
 table.insert(cleanup, carefulHeartbeat)
 
 K.onUnload(function()
@@ -82187,7 +82869,7 @@ local ueS = tbl17.ueS()
 -- Careful style (LY's ragebot); a failure there must not take the other styles down with it
 local okLYC, lyRage = pcall(tbl17.LYC)
 if not okLYC then
-warn("[Kicia Rebuild] Careful style (LY ragebot) failed to load: " .. tostring(lyRage))
+KQ("[Kicia Rebuild] Careful style (LY ragebot) failed to load: " .. tostring(lyRage))
 lyRage = nil
 end
 
@@ -82773,7 +83455,7 @@ table.insert(enemies, string.format("%s:%s shoot %.2f attack %.2f reload %.2f", 
 end
 end
 end
-warn(string.format("[FW hit] -%.0f hp (%.0f left) | now %s | phases: %s | knife: has=%s canOpen=%s remaining=%.2f | weapon check=%s blocked=%s remaining=%.2f reloading=%s | enemies: %s",
+KQ(string.format("[FW hit] -%.0f hp (%.0f left) | now %s | phases: %s | knife: has=%s canOpen=%s remaining=%.2f | weapon check=%s blocked=%s remaining=%.2f reloading=%s | enemies: %s",
 fwLastHealth - fwHealth, fwHealth, tostring(arg._fwPhase), table.concat(phases, ", "), tostring(hasKnife), tostring(knifeCanOpen), knifeRemaining,
 tostring(fwWeaponCheck), tostring(gunBlocked), gunRemaining, tostring(gunReloading), table.concat(enemies, " ; ")))
 end)
@@ -85864,6 +86546,7 @@ end
 end
 do -- j1
 local function fn35()
+K.Mark("init: start")
 local v115 = tbl17.dh()
 task.wait()
 local v116 = tbl17.di()
@@ -85880,6 +86563,7 @@ local v126 = tbl17.dO()
 local v127 = tbl17.bG()
 local v128 = tbl17.e0()
 task.wait()
+K.Mark("init: modules 1")
 local v129 = tbl17.e3()
 local v130 = tbl17.e4()
 local v131 = tbl17.fm()
@@ -85894,6 +86578,7 @@ local v139 = tbl17.c_()
 local v140 = tbl17.ad()
 local v141 = tbl17.gc()
 task.wait()
+K.Mark("init: modules 2")
 local v142 = tbl17.gd()
 local v143 = tbl17.ge()
 local v144 = tbl17.cF()
@@ -85933,6 +86618,7 @@ local v176 = tbl17.gT()
 tbl17.g1()
 local v177 = tbl17.g2()
 local v178 = tbl17.eZ()
+K.Mark("init: modules 3")
 local v179 = tbl17.hb()
 local v180 = tbl17.hc()
 local v181 = tbl17.hd()
@@ -85943,6 +86629,7 @@ local v185 = tbl17.hL()
 local v186 = tbl17.jf()
 local v187 = tbl17.jg()
 
+K.Mark("init: modules done")
 return function(arg)
 v187()
 local storeProfiles = arg.StoreProfiles
@@ -85979,6 +86666,7 @@ if armAvatarSpoofer ~= nil then
 armAvatarSpoofer()
 end
 
+K.Mark("init: fonts/colour")
 local v190 = v147:Add(v144.new())
 local v191 = v147:Add(v135.new())
 local v192 = v147:Add(v168.new())
@@ -85995,6 +86683,7 @@ local v198 = v147:Add(v148.new(v190, playerTags))
 K.HackerDetector = v198
 K.HackerTags = playerTags
 
+K.Mark("init: core objects")
 local v199 = v147:Add(v164.new(v190))
 v185(storeProfiles, v147, v199)
 local v200 = v147:Add(v138.new(v190, v199))
@@ -86017,6 +86706,7 @@ local v211 = v147:Add(v170.new())
 local v212 = v147:Add(v149.new())
 v188:ReportResult(v153.MigrateSounds(v211))
 v188:ReportResult(v153.MigrateImages(v212))
+K.Mark("init: storages")
 local v213 = v147:Add(v166.new(v209, v199, v211))
 local v214 = v147:Add(v165.new(v209, v199, v200, v211))
 v147:Add(v122.new(v209:Reserve({ "RespawnNowAnimation" })))
@@ -86036,6 +86726,7 @@ v147:Add(v152.new())
 v147:Add(tbl17.ju().new(v199))
 local v218 = v139.new(v201, v199)
 v147:Add(v163.new(v199, v201, v216))
+K.Mark("init: systems 1")
 local v219 = v147:Add(v171.new(v190, v199, v218, v208:Reserve(), v203))
 local v220 = v147:Add(v115.new(v190, v199, v218))
 local v221 = v147:Add(v157.new(v199))
@@ -86059,18 +86750,20 @@ local v234 = v147:Add(v123.new(v209, v199))
 local v235 = v209
 local reserve = v235.Reserve
 local v236 = v147:Add(tbl17.j_().new(v199, v191, v202, v208, reserve(v235, { "DataValueChanged" })))
+K.Mark("init: systems 2")
 local v237 = v147:Add(v128.new(v199, v190, v197, v193, v192:Reserve(), v215))
 local v238 = v147:Add(v129.new(v237))
 v188:ReportResult(v238:LoadCoreConfig())
+K.Mark("init: cosmetics")
 local v239 = v147:Add(v146.new())
 
-v239:SetPreCameraRender(function(arg2)
+v239:SetPreCameraRender(LPH_NO_VIRTUALIZE(function(arg2)
 v218:Update()
 v220:Update(arg2)
 v231:PreCameraRenderUpdate()
-end)
+end))
 
-v239:SetPreRender(function(arg2)
+v239:SetPreRender(LPH_NO_VIRTUALIZE(function(arg2)
 v205:PreRender(arg2)
 v206:PreRender(arg2)
 v237:PreRender()
@@ -86085,11 +86778,11 @@ v189:Update()
 if v236 then
 v236:Update(arg2)
 end
-end)
+end))
 
-v239:SetPreSimulation(function(arg2)
+v239:SetPreSimulation(LPH_NO_VIRTUALIZE(function(arg2)
 v231:PreSimulationUpdate(arg2)
-end)
+end))
 
 -- UE's "underground" (Toggles.anti_aim_floor_hide, root UI pc6585-6587 -- text 'underground',
 -- tooltip 'hides you in the floor', default off, with its own keybind). 237 pc252-257 caches the
@@ -86118,7 +86811,7 @@ end)
 -- Depth is the menu slider (5-15, Movement.Underground.Speed). The ragebot is held off while this is on (K.UndergroundActive).
 local ueUndergroundPose = CFrame.Angles(math.rad(90), 0, 0)
 
-local function applyUnderground()
+local applyUnderground = LPH_NO_VIRTUALIZE(function()
 local movement = tbl17.bG().Data.Movement
 local settings = movement ~= nil and movement.Underground or nil
 if settings == nil then
@@ -86147,9 +86840,9 @@ return
 end
 controller:SetServerCFrame(CFrame.new(clientCFrame.Position - Vector3.new(0, math.clamp(settings.Speed or 5, 5, 15), 0)) * ueUndergroundPose)
 K.UndergroundDebug = "applied"
-end
+end)
 
-v239:SetHeartbeat(function(arg2)
+v239:SetHeartbeat(LPH_NO_VIRTUALIZE(function(arg2)
 v199:HeartbeatUpdate()
 v190:Update(arg2)
 
@@ -86170,8 +86863,9 @@ v232:Update()
 v233:Update()
 pcall(v198.Update, v198, arg2)
 v199:FlushViewAngles()
-end)
+end))
 
+K.Mark("init: callbacks set")
 v239:Start()
 
 v186({
@@ -86245,6 +86939,7 @@ tbl17.jx = function() return nil end
 --  Lithium's crystal logo (256x256 PNG, base64), used as the menu logo.
 local LITHIUM_LOGO_B64 = "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R2dnuzBNiyulYQuhlZKqoiLOpBTYuu3Zv/7pL7csv/XWvzyzaNEibtu21dzcLEuk1sqbvhwBlO2NcOrXAcEpi2Yaq1dv7Gm+5ZaPTZty9G+SHT2CccZBGZRU0rJMZpgMe/fufmbNw2u+cfkVl98GgDU1NbEVK1bI/7GEWtnKEUDZXiWqbz5qypTA6tUb81+85JKPTp447Te96ZyUWjEtIU3GWG1dLTvQcqB707qNP77o0ouuBpA7//zzA2PGjHFWrFghyvl92cr2xgz72aJFiwIAyLe+8pXpG9as79m8cbt6aPVj7kOrHpHPPPmsfvS/a0Xzzc2/nj199lQAaGxsNBsbG83y5Stb2fCGh/kySilOOOGEUeseXrft2Se36kcfetzetmm73vzkM/q2v95250UXXnSs//zAokWLIr7jKFvZyvZGT/201hSAedvf//XIU+uf1k+sfULv27lXr77ngae//c1vNxY3+/nnnx/AiBHB8uYvW9neJKf/29/+9koA5J4777l+7+59etOTT+vV997X8strrvkigAQAY8mSJeFp06aVw/2yle3NZKtWreIArD/d+Pvr7XRer7pnVerG62/4Xm04XAcAixYtCsyYMSNcVAIqX7Gyle1NYn7Yjz/cdNN3d+/Yqf/W/NdfLzlxydji/1933XVG+SqVrWxvQmtsbGQAcOmlnznnryv/cm/TN7+50G8DG35UULaylQ1vctDX+eefX1/8wcKjj06MjscryniQspXtrZUKkJUrVxZz/HKuX7ayleHfZStb2cpWtrKVrWxlK1vZyla2spWtbGUrW9nKVrayla1sZStb2cpWtrKVrWxlK1vZyla2spWtbGUrW9nKVrY3iP0/XljBGXHIyGgAAAAASUVORK5CYII="
 
+K.Mark("bootstrap + main")
 --==========================================================================
 --  Kicia's bootstrap (b8) and main (j1), as in the dump. Left out of b8:
 --  the analytics client (kicia.cc), the Luarmor auto-execute writer and the
@@ -86338,8 +87033,9 @@ do
     K.LoadLogo()
 end
 
+K.Mark("ui form")
 --==========================================================================
---  UI form: "Starlight" (default) or "Classic" (the script's own menu). Chosen at startup from getgenv().LxYUI or
+--  UI form: "Classic" (default, the script's own menu) or "Starlight". Chosen at startup from getgenv().LxYUI or
 --  the file kiciarebuild/ui_style.txt, switched live from Settings > General > UI Style.
 --  (ui_style.txt replaces the old ui_mode.txt, so a Classic choice saved before Starlight became the default is ignored.)
 --==========================================================================
@@ -86358,7 +87054,7 @@ do
                 if valid(text) then return text end
             end
         end
-        return "Starlight"
+        return "Classic"
     end
     function K.SetUIMode(m)
         if not valid(m) then return end
@@ -86374,6 +87070,7 @@ do
     end
 end
 
+K.Mark("starlight backend")
 --==========================================================================
 --  Starlight UI backend (second form of the menu)
 --  The page builders talk to a Menu object (AddTab / Grid / AddSection / AddToggle ...). K.StarUI.Menu implements
@@ -86389,7 +87086,9 @@ end
 --    * Gradient colours are edited as one colour; the skin changer, viewport, icon strip and gear widgets have
 --      no Starlight equivalent (the skin changer page shows a button back to the classic menu).
 --==========================================================================
-do
+K.LoadAltUI = function() -- Starlight / Lite / Setsuna / Matcha / KH V2 forms: defined when one of them is first chosen
+    if K.AltUILoaded then return end
+    K.AltUILoaded = true
     local StarUI = {}
     K.StarUI = StarUI
 
@@ -91923,12 +92622,12 @@ end
     ----------------------------------------------------------------------------------------------- KH V2
     -- Sixth form of the menu: the "Kiciahook V2" look. A small square-cornered window with a 1 px blue frame, a thin
     -- title bar ("Kiciahook V2 | Rivals"), a row of tabs and, for a tab with several pages, a row of page tabs under
-    -- it. Everything is flat dark grey with the blue accent, drawn in the Ubuntu font, and it can be resized from the
-    -- grip in the bottom right corner. It is a Matcha with another shell and theme (square corners come from
+    -- it. Everything is flat dark grey with the blue accent, drawn in the Ubuntu font. The window has one fixed size (the
+    -- newer KHv2UI dropped the resize handles; it only scales down to fit a small screen) and a touch screen gets a
+    -- static "Open" box at the top centre. It is a Matcha with another shell and theme (square corners come from
     -- sharpCorners, set in newMenu), so it reuses the Lite widgets and every page builder works unchanged.
     ;(function() -- own function (see the end of this block): V2 must not add locals to the saturated main chunk
     local V2_W, V2_H, V2_HEAD = 520, 360, 22
-    local V2_MIN_W, V2_MIN_H, V2_MAX_W, V2_MAX_H = 420, 300, 1000, 800
     local V2_TITLE = "Kiciahook V2 | Rivals"
 
     local SV2 = {}
@@ -92066,45 +92765,32 @@ end
         self._placeBody = place
         place()
 
-        -- resize grip, bottom right
-        local grip = mk("TextButton", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 0, 1, 0), Size = UDim2.fromOffset(16, 16),
-            BackgroundTransparency = 1, Text = "", AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 20 }, win)
-        for i = 1, 3 do
-            local dot = mk("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -3, 1, -3 - (i - 1) * 4), Size = UDim2.fromOffset(i * 3, 1),
-                BorderSizePixel = 0, ZIndex = 21 }, grip)
-            self:_paint(dot, "BackgroundColor3", "acc")
-        end
-        self._grip = grip
-        grip.InputBegan:Connect(function(input)
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-            self:_closePopup()
-            local sx, sy = pointer(input)
-            local w0, h0 = self._w, self._h
-            local p0 = win.Position
-            local moveConn, endConn
-            moveConn = UIS.InputChanged:Connect(function(i)
-                if i.UserInputType ~= Enum.UserInputType.MouseMovement and i.UserInputType ~= Enum.UserInputType.Touch then return end
-                local x, y = pointer(i)
-                local k = self._k or 1
-                -- the window is centred on its anchor: move the centre by half the growth so the top left stays put
-                local w1 = clamp(w0 + (x - sx) / k, V2_MIN_W, V2_MAX_W)
-                local h1 = clamp(h0 + (y - sy) / k, V2_MIN_H, V2_MAX_H)
-                self._w, self._h = w1, h1
-                self._moved = true
-                win.Position = UDim2.fromOffset(p0.X.Offset + (w1 - w0) / 2, p0.Y.Offset + (h1 - h0) / 2)
-                self:_relayout()
-            end)
-            endConn = UIS.InputEnded:Connect(function(i)
-                if i == input or i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-                    moveConn:Disconnect()
-                    endConn:Disconnect()
-                end
-            end)
-        end)
+        -- open button for touch screens: a static 50 x 50 box at the top centre that opens and closes the menu. It lives in
+        -- its own gui because the menu's gui is switched off while the menu is hidden. (open button by Neteless, don't steal)
+        local openGui = mk("ScreenGui", { Name = "Kiciahook V2 Open", ResetOnSpawn = false, DisplayOrder = 100001, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+        local openPlaced = pcall(function() openGui.Parent = gethui() end)
+        if not openPlaced or openGui.Parent == nil then openGui.Parent = game:GetService("CoreGui") end
+        self._openGui = openGui
+        local openBox = mk("Frame", { BackgroundColor3 = Color3.fromRGB(15, 15, 15), BackgroundTransparency = .6, BorderColor3 = Color3.new(0, 0, 0),
+            BorderSizePixel = 1, Position = UDim2.new(.5, 0, 0, -30), AnchorPoint = Vector2.new(.5, 0), Size = UDim2.fromOffset(50, 50),
+            Visible = UIS.TouchEnabled, ZIndex = 5 }, openGui)
+        mk("UICorner", { CornerRadius = UDim.new(0, 10) }, openBox)
+        local openInner = mk("Frame", { BackgroundColor3 = Color3.fromRGB(20, 20, 20), BackgroundTransparency = .6, BorderColor3 = Color3.fromRGB(50, 50, 50),
+            BorderMode = Enum.BorderMode.Inset, BorderSizePixel = 1, Size = UDim2.fromScale(1, 1), ZIndex = 6 }, openBox)
+        mk("UICorner", { CornerRadius = UDim.new(0, 9) }, openInner)
+        local openBtn = mk("TextButton", { BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), Text = "Open", Font = Enum.Font.Ubuntu,
+            TextSize = 14, TextColor3 = Color3.new(1, 1, 1), TextStrokeTransparency = .5, TextYAlignment = Enum.TextYAlignment.Center,
+            AutoButtonColor = false, ZIndex = 7 }, openInner)
+        openBtn.Activated:Connect(function() self:SetVisible(not self.Visible) end)
 
         dim.Activated:Connect(function() self:_closePopup() end)
         gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:_relayout() end)
         self:_relayout()
+    end
+
+    function SV2:Destroy()
+        pcall(function() if self._openGui ~= nil then self._openGui:Destroy() end end)
+        SLite.Destroy(self)
     end
 
     function SV2:_relayout()
@@ -92116,7 +92802,7 @@ end
             vw, vh = cam.ViewportSize.X, cam.ViewportSize.Y
         end
         if vw <= 0 or vh <= 0 then return end
-        local k = clamp(math.min(1, (vw - 24) / V2_MIN_W, (vh - 24) / V2_MIN_H), .5, 1)
+        local k = clamp(math.min(1, (vw - 24) / V2_W, (vh - 24) / V2_H), .5, 1)
         k = math.floor(k * 20) / 20
         self._k = k
         self._uiscale.Scale = k
@@ -92185,6 +92871,7 @@ end
     end)() -- own function: the main chunk was at the 200 local register limit, so V2 gets its own registers
 end
 ;(function()
+K.Mark("shared hud")
 --==========================================================================
 --  Shared HUD for the Starlight / Lite / Setsuna forms: the watermark and the keybind list. Those forms only keep
 --  the two on / off flags; this draws the HUD the same way for all of them (the LY form draws its own with MD3, the
@@ -92377,7 +93064,7 @@ do
     local function startTick()
         if tickConn ~= nil then return end
         local last = 0
-        tickConn = RunService.Heartbeat:Connect(function(dt)
+        tickConn = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function(dt)
             frames += 1
             local now = os.clock()
             if now - fpsAt >= 0.5 then
@@ -92388,7 +93075,7 @@ do
                 dirty, last = false, now
                 pcall(repaint)
             end
-        end)
+        end))
     end
 
     function KeyHud.ensure(name, watermark, keybinds)
@@ -92424,6 +93111,7 @@ do
 end
 end)()
 
+K.Mark("weapon visuals")
 --==========================================================================
 --  Weapon Visuals from LY.lua: the first-person weapon motion switch, the arm and gun chams
 --  (material, colour, transparency, wireframe) and the muzzle flash switch run on the code of LY.lua; the options
@@ -92863,7 +93551,7 @@ local function setup()
 		end
 		for _, folder in viewmodelFolders() do watchFolder(folder) end
 		local sweepAt = os.clock()
-		trackStopper = RunService.Heartbeat:Connect(function()
+		trackStopper = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 			local now = os.clock()
 			if now - sweepAt < 0.5 then return end
 			sweepAt = now
@@ -92887,7 +93575,7 @@ local function setup()
 					stopMatching(animator)
 				end
 			end
-		end)
+		end))
 	end
 
 	local function setAnimationDisabled(kind, on)
@@ -93659,7 +94347,7 @@ function offsetCache.models()
 	return list
 end
 track(offsetCache.drop)
-RunService:BindToRenderStep(VIEWMODEL_STEP, Enum.RenderPriority.Last.Value, function()
+RunService:BindToRenderStep(VIEWMODEL_STEP, Enum.RenderPriority.Last.Value, LPH_NO_VIRTUALIZE(function()
 	if viewmodel.Offset then
 		local offset = CFrame.new(viewmodel.X, viewmodel.Y, viewmodel.Z)
 		for _, model in offsetCache.models() do
@@ -93684,7 +94372,7 @@ RunService:BindToRenderStep(VIEWMODEL_STEP, Enum.RenderPriority.Last.Value, func
 		lastChamScan = now
 		refreshChams()
 	end
-end)
+end))
 track(function()
 	RunService:UnbindFromRenderStep(VIEWMODEL_STEP)
 	clearChams()
@@ -93759,10 +94447,11 @@ end
 end
 task.defer(function()
     local ok, err = pcall(setup)
-    if not ok then warn("[LxYHook] weapon visuals of LY failed: " .. tostring(err)) end
+    if not ok then KQ("[LxYHook] weapon visuals of LY failed: " .. tostring(err)) end
 end)
 end)()
 
+K.Mark("ly skins")
 --==========================================================================
 --  LY custom skins (ported from LYHub): extra Contraband-style skins built on stock
 --  viewmodels. They are registered into CosmeticLibrary before Kicia reads it, so they
@@ -94689,7 +95378,7 @@ MD3.LYSkinData["Warpstone (Custom Skin)"] = [=[{'src':'Elixir','il':{'Image':'rb
 			building[name] = nil
 			if not ok then
 				MD3.LYLastError = tostring(result)
-				warn("LY skin " .. name .. ": " .. tostring(result))
+				KQ("LY skin " .. name .. ": " .. tostring(result))
 			end
 			return ok
 		end
@@ -94814,7 +95503,7 @@ MD3.LYSkinData["Warpstone (Custom Skin)"] = [=[{'src':'Elixir','il':{'Image':'rb
 			buildBusy = false
 			buildQueued[name] = nil
 			if not okBuild then
-				warn("[Kicia LY] build " .. tostring(name) .. " errored: " .. tostring(built))
+				KQ("[Kicia LY] build " .. tostring(name) .. " errored: " .. tostring(built))
 				built = false
 			end
 			if built then
@@ -94829,7 +95518,7 @@ MD3.LYSkinData["Warpstone (Custom Skin)"] = [=[{'src':'Elixir','il':{'Image':'rb
 				local delay = math.min(60, 5 * 2 ^ (failures - 1))
 				buildFailures[name] = failures
 				buildRetryAt[name] = os.clock() + delay
-				warn(string.format("[Kicia LY] build %s not done (attempt %d), next try in %d s", tostring(name), failures, delay))
+				KQ(string.format("[Kicia LY] build %s not done (attempt %d), next try in %d s", tostring(name), failures, delay))
 			end
 		end)
 	end
@@ -95064,7 +95753,7 @@ end
 do
 	local ok, result = pcall(setupLYSkins)
 	if not ok then
-		warn("[Kicia Rebuild] LY skins failed to set up: " .. tostring(result))
+		KQ("[Kicia Rebuild] LY skins failed to set up: " .. tostring(result))
 	else
 		K.Skins = result
 		local t0 = tick()
@@ -95094,788 +95783,18 @@ do
 			end
 		end)
 		local sample = type(cosmetics) == "table" and cosmetics["Arcane (Revolver)"]
-		warn(string.format("[Kicia LY] custom skins registered: %d/%d (library ready: %s, Arcane: %s/%s)%s",
+		KQ(string.format("[Kicia LY] custom skins registered: %d/%d (library ready: %s, Arcane: %s/%s)%s",
 			total - #missing, total, tostring(registered),
 			tostring(type(sample) == "table" and sample.ItemName), tostring(type(sample) == "table" and sample.Rarity),
 			#missing > 0 and (" missing: " .. table.concat(missing, ", ")) or ""))
 	end
 end
 
---==========================================================================
---  UE cosmetics changer (ported from Unnamed Enhancements; its decompile is in Downloads\ue_decomp).
---  UE keeps one record per weapon, misc.cosmetics_cache[weapon] = { skin = {enabled, name, random},
---  wrap = {enabled, name, random, inverted}, charm = {...}, finisher = {...} }, and every time a weapon
---  is built (protos 380 / 156) it writes the record into the weapon data for the LOCAL fighter only;
---  a "random" record is re-rolled from that weapon's own pool (skins) or the global pool (wraps /
---  charms / finishers) on each build. Here the same per-weapon records drive Kicia's skin-changer layer
---  (Cosmetics:SetSkinChangerChoice), so menus, viewmodels and previews follow, and the random records
---  are re-rolled on every respawn. The UI lives in the Cosmetics > Overview tab (K.UESkins.BuildUI).
---==========================================================================
-local function setupUESkins()
-	local HttpService = game:GetService("HttpService")
-	local Players = game:GetService("Players")
-	local LocalPlayer = Players.LocalPlayer
-	local SAVE_FILE = "kicia_ue_skins.json"
-	local KINDS = { "skin", "wrap", "charm", "finisher" }
-	local TYPE_OF = { skin = "Skin", wrap = "Wrap", charm = "Charm", finisher = "Finisher" }
-	local UE = { Enabled = false, RerollOnRespawn = true, Weapon = nil, Records = {}, Applied = {} }
-
-	local function recordsFor(weapon, create)
-		local records = UE.Records[weapon]
-		if records == nil and create then
-			records = {}
-			for _, kind in ipairs(KINDS) do
-				records[kind] = { enabled = false, name = nil, random = false, inverted = false }
-			end
-			UE.Records[weapon] = records
-		end
-		return records
-	end
-
-	local function catalog()
-		local ok, result = pcall(function() return tbl17.eT() end)
-		return ok and type(result) == "table" and result or nil
-	end
-
-	local function pool(kind, weapon)
-		local data = catalog()
-		if data == nil then
-			return {}
-		end
-		if kind == "skin" then
-			return data.Skins[weapon] or {}
-		elseif kind == "wrap" then
-			return data.Wraps
-		elseif kind == "charm" then
-			return data.Charms
-		end
-		return data.Finishers
-	end
-
-	-- UE: a random record picks math.random(1, #list) from the pool, a plain one uses its stored name
-	local function pick(kind, weapon, record)
-		if record.random then
-			local list = pool(kind, weapon)
-			if #list > 0 then
-				return list[math.random(1, #list)]
-			end
-			return nil
-		end
-		return record.name
-	end
-
-	function UE.Save()
-		local writefile_ = K.fn("writefile")
-		if writefile_ == nil then
-			return
-		end
-		local records = {}
-		for weapon, kinds in pairs(UE.Records) do
-			local out = {}
-			for _, kind in ipairs(KINDS) do
-				local r = kinds[kind]
-				out[kind] = { enabled = r.enabled, name = r.name, random = r.random, inverted = r.inverted }
-			end
-			out.off = kinds.off == true
-			records[weapon] = out
-		end
-		pcall(function()
-			writefile_(SAVE_FILE, HttpService:JSONEncode({
-				Enabled = UE.Enabled,
-				RerollOnRespawn = UE.RerollOnRespawn,
-				Weapon = UE.Weapon,
-				Records = records,
-			}))
-		end)
-	end
-
-	local function load()
-		local isfile_, readfile_ = K.fn("isfile"), K.fn("readfile")
-		if not (isfile_ and readfile_) then
-			return
-		end
-		local ok, data = pcall(function()
-			if not isfile_(SAVE_FILE) then
-				return nil
-			end
-			return HttpService:JSONDecode(readfile_(SAVE_FILE))
-		end)
-		if not ok or type(data) ~= "table" then
-			return
-		end
-		UE.Enabled = data.Enabled == true
-		UE.RerollOnRespawn = data.RerollOnRespawn ~= false
-		UE.Weapon = type(data.Weapon) == "string" and data.Weapon or nil
-		if type(data.Records) ~= "table" then
-			return
-		end
-		for weapon, kinds in pairs(data.Records) do
-			if type(weapon) == "string" and type(kinds) == "table" then
-				local records = recordsFor(weapon, true)
-				records.off = kinds.off == true
-				for _, kind in ipairs(KINDS) do
-					local saved = kinds[kind]
-					if type(saved) == "table" then
-						local r = records[kind]
-						r.enabled = saved.enabled == true
-						r.random = saved.random == true
-						r.inverted = saved.inverted == true
-						r.name = type(saved.name) == "string" and saved.name or nil
-					end
-				end
-			end
-		end
-	end
-
-	-- Pushes one weapon's records into the skin-changer layer, and takes back what we set earlier
-	-- once a record is switched off (or the whole changer is).
-	function UE.ApplyWeapon(l, weapon)
-		local cosmetics = l and l.Cosmetics
-		if cosmetics == nil then
-			return
-		end
-		local records = recordsFor(weapon, false)
-		local applied = UE.Applied[weapon]
-		if applied == nil then
-			applied = {}
-			UE.Applied[weapon] = applied
-		end
-		for _, kind in ipairs(KINDS) do
-			local record = UE.Enabled and records and not records.off and records[kind] or nil
-			local name = record and record.enabled and pick(kind, weapon, record) or nil
-			if name ~= nil then
-				local choice
-				if kind == "wrap" then
-					choice = { Kind = "Wrap", Wrap = { Name = name, Inverted = record.inverted == true } }
-				else
-					choice = { Kind = TYPE_OF[kind], Name = name }
-				end
-				cosmetics:SetSkinChangerChoice(weapon, choice)
-				applied[kind] = true
-			elseif applied[kind] then
-				cosmetics:ClearSkinChangerSelection(weapon, TYPE_OF[kind])
-				applied[kind] = nil
-			end
-		end
-	end
-
-	function UE.ApplyAll(l, onlyRandom)
-		local weapons = {}
-		for weapon in pairs(UE.Records) do
-			weapons[weapon] = true
-		end
-		for weapon in pairs(UE.Applied) do
-			weapons[weapon] = true
-		end
-		for weapon in pairs(weapons) do
-			local hasRandom = false
-			local records = UE.Records[weapon]
-			if records ~= nil then
-				for _, kind in ipairs(KINDS) do
-					if records[kind].enabled and records[kind].random then
-						hasRandom = true
-					end
-				end
-			end
-			if not onlyRandom or hasRandom then
-				local ok, err = pcall(UE.ApplyWeapon, l, weapon)
-				if not ok then
-					warn("[Kicia UE] apply " .. tostring(weapon) .. " failed: " .. tostring(err))
-				end
-			end
-		end
-	end
-
-	-- UE's popout (proto 165 builds it, 4230 builds a tile, 4234 fills the grids, 4231 picks tile images):
-	-- "Cosmetic Changer", 669 wide. weapon filter box + a 7-column weapon grid (207 high), cosmetic
-	-- filter box + a 7-column cosmetic grid (207 high), an "inverted" toggle that only shows in wrap
-	-- mode, and the mode dropdown (skin / wrap / charm / finisher). A tile is a (51,51,51) ImageButton at
-	-- 0.85 transparency with a centred image, a name label and a dark hover overlay (13188153054 at
-	-- 0.75). The skin list starts with the weapon's own default look, as UE inserts the weapon name at 1.
-	local STOCK = "NONE_COSMETIC"
-	local ACCENT = Color3.fromRGB(86, 170, 190)
-
-	local function itemLibrary()
-		local ok, library = pcall(function() return tbl17.aS().ItemLibrary end)
-		return ok and type(library) == "table" and library or nil
-	end
-
-	local function weaponList()
-		local library = itemLibrary()
-		local source = library and library.OwnableWeapons
-		local list = {}
-		if type(source) == "table" then
-			if #source > 0 then
-				for _, name in ipairs(source) do
-					list[#list + 1] = name
-				end
-			else
-				for name, owned in pairs(source) do
-					list[#list + 1] = type(name) == "string" and name or owned
-				end
-			end
-		end
-		if #list == 0 then
-			list = table.clone(tbl17.aT())
-		end
-		table.sort(list)
-		return list
-	end
-
-	-- 4231: the tile image is ItemLibrary.ViewModels[name].ImageHighResolution
-	local function imageFor(name)
-		if name == nil or name == STOCK then
-			return "rbxassetid://0"
-		end
-		local library = itemLibrary()
-		local models = library and library.ViewModels
-		local entry = type(models) == "table" and models[name] or nil
-		if type(entry) == "table" then
-			local image = entry.ImageHighResolution or entry.Image
-			if type(image) == "string" and image ~= "" then
-				return image
-			end
-		end
-		local data = catalog()
-		local image = data and data.Images[name]
-		if type(image) == "string" and image ~= "" then
-			return image
-		end
-		return "rbxassetid://89204837120267"
-	end
-
-	function UE.BuildPanel(l, onChanged, onClosed)
-		local UserInputService = game:GetService("UserInputService")
-		local gethui_ = K.fn("gethui")
-		local parent = gethui_ and gethui_() or game:GetService("CoreGui")
-		local MODES = { "skin", "wrap", "charm", "finisher" }
-		local mode = "skin"
-		local weaponFilter, cosmeticFilter = "", ""
-		local weapons = weaponList()
-		if UE.Weapon == nil or table.find(weapons, UE.Weapon) == nil then
-			UE.Weapon = weapons[1]
-		end
-		local BACK = Color3.fromRGB(12, 12, 12)
-		local BOX = Color3.fromRGB(22, 22, 22)
-		local EDGE = Color3.fromRGB(48, 48, 48)
-		local TEXT = Color3.fromRGB(235, 235, 235)
-		local GREEN = Color3.fromRGB(70, 120, 60)
-
-		local gui = Instance.new("ScreenGui")
-		gui.Name = "KiciaUECosmeticChanger"
-		gui.ResetOnSpawn = false
-		gui.DisplayOrder = 100
-		gui.Enabled = false
-		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-		gui.Parent = parent
-
-		local main = Instance.new("Frame")
-		main.Size = UDim2.fromOffset(653, 658)
-		main.Position = UDim2.new(0.5, -326, 0.5, -329)
-		main.BackgroundColor3 = BACK
-		main.BorderSizePixel = 0
-		main.Parent = gui
-		local mainStroke = Instance.new("UIStroke")
-		mainStroke.Color = EDGE
-		mainStroke.Parent = main
-
-		local function stroke(item)
-			local line = Instance.new("UIStroke")
-			line.Color = EDGE
-			line.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-			line.Parent = item
-		end
-
-		local function label(text, y, height, size, align)
-			local item = Instance.new("TextLabel")
-			item.BackgroundTransparency = 1
-			item.Position = UDim2.fromOffset(10, y)
-			item.Size = UDim2.new(1, -20, 0, height)
-			item.Font = Enum.Font.Code
-			item.TextSize = size or 13
-			item.TextColor3 = TEXT
-			item.TextXAlignment = align or Enum.TextXAlignment.Left
-			item.Text = text
-			item.Parent = main
-			return item
-		end
-
-		local title = label("Cosmetic Changer", 0, 30, 15, Enum.TextXAlignment.Center)
-		local dragging, dragStart, startPos = false, nil, nil
-		title.Active = true
-		title.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				dragging, dragStart, startPos = true, input.Position, main.Position
-			end
-		end)
-		UserInputService.InputChanged:Connect(function(input)
-			if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-				local delta = input.Position - dragStart
-				main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
-					startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-			end
-		end)
-		UserInputService.InputEnded:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				dragging = false
-			end
-		end)
-
-		local function textBox(text, placeholder, y, callback)
-			label(text, y, 16, 12)
-			local box = Instance.new("TextBox")
-			box.Position = UDim2.fromOffset(10, y + 18)
-			box.Size = UDim2.new(1, -20, 0, 24)
-			box.BackgroundColor3 = BOX
-			box.BorderSizePixel = 0
-			box.ClearTextOnFocus = false
-			box.Font = Enum.Font.Code
-			box.TextSize = 13
-			box.TextColor3 = TEXT
-			box.PlaceholderText = placeholder
-			box.PlaceholderColor3 = Color3.fromRGB(120, 120, 120)
-			box.Text = ""
-			box.TextXAlignment = Enum.TextXAlignment.Left
-			box.Parent = main
-			stroke(box)
-			local pad = Instance.new("UIPadding")
-			pad.PaddingLeft = UDim.new(0, 8)
-			pad.Parent = box
-			box:GetPropertyChangedSignal("Text"):Connect(function()
-				callback(string.lower(box.Text))
-			end)
-			return box
-		end
-
-		local function scroller(y)
-			local frame = Instance.new("ScrollingFrame")
-			frame.Position = UDim2.fromOffset(10, y)
-			frame.Size = UDim2.new(1, -20, 0, 207)
-			frame.BackgroundColor3 = BOX
-			frame.BorderSizePixel = 0
-			frame.ScrollBarThickness = 0
-			frame.CanvasSize = UDim2.new(1, 0, 0, 0)
-			frame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-			frame.ClipsDescendants = true
-			frame.Parent = main
-			stroke(frame)
-			local layout = Instance.new("UIGridLayout")
-			layout.FillDirectionMaxCells = 6
-			layout.FillDirection = Enum.FillDirection.Horizontal
-			layout.SortOrder = Enum.SortOrder.LayoutOrder
-			layout.CellPadding = UDim2.fromOffset(2, 2)
-			layout.CellSize = UDim2.new(0.1666, -2, 0, 102)
-			layout.Parent = frame
-			return frame
-		end
-
-		local weaponGrid, cosmeticGrid
-		local rebuildWeapons, rebuildCosmetics
-
-		-- 4230: ImageButton + centred image + name + hover overlay; a right click is the weapon toggle
-		local function tile(parentFrame, order, image, caption, tint, dim, onClick, onRightClick)
-			local button = Instance.new("ImageButton")
-			button.LayoutOrder = order
-			button.AutoButtonColor = false
-			button.BorderSizePixel = 0
-			button.Image = "rbxassetid://0"
-			button.BackgroundColor3 = tint or Color3.fromRGB(51, 51, 51)
-			button.BackgroundTransparency = tint and 0.45 or 0.85
-			button.ZIndex = 2
-			button.Parent = parentFrame
-			local hover = Instance.new("ImageLabel")
-			hover.AnchorPoint = Vector2.new(0.5, 0.5)
-			hover.Position = UDim2.fromScale(0.5, 0.5)
-			hover.Size = UDim2.fromScale(0.62, 0.8)
-			hover.BackgroundTransparency = 1
-			hover.Image = "rbxassetid://13188153054"
-			hover.ImageTransparency = 0.75
-			hover.ImageColor3 = Color3.new(0, 0, 0)
-			hover.ZIndex = 3
-			hover.Parent = button
-			local picture = Instance.new("ImageLabel")
-			picture.AnchorPoint = Vector2.new(0.5, 0.5)
-			picture.Position = UDim2.fromScale(0.5, 0.46)
-			picture.Size = UDim2.fromScale(0.92, 0.78)
-			picture.BackgroundTransparency = 1
-			picture.ScaleType = Enum.ScaleType.Fit
-			picture.Image = image
-			picture.ImageTransparency = dim and 0.6 or 0
-			picture.ZIndex = 4
-			picture.Parent = button
-			local text = Instance.new("TextLabel")
-			text.AnchorPoint = Vector2.new(0.5, 1)
-			text.Position = UDim2.fromScale(0.5, 0.97)
-			text.Size = UDim2.new(1, -6, 0, 24)
-			text.BackgroundTransparency = 1
-			text.Font = Enum.Font.GothamBold
-			text.TextScaled = true
-			text.TextColor3 = dim and Color3.fromRGB(130, 130, 130) or Color3.new(1, 1, 1)
-			text.TextStrokeTransparency = 0.5
-			text.Text = caption
-			text.ZIndex = 5
-			text.Parent = button
-			local limit = Instance.new("UITextSizeConstraint")
-			limit.MaxTextSize = #caption <= 12 and 20 or 11
-			limit.MinTextSize = 8
-			limit.Parent = text
-			button.MouseEnter:Connect(function()
-				button.BackgroundTransparency = 0.6
-			end)
-			button.MouseLeave:Connect(function()
-				button.BackgroundTransparency = tint and 0.45 or 0.85
-			end)
-			button.MouseButton1Click:Connect(onClick)
-			if onRightClick then
-				button.MouseButton2Click:Connect(onRightClick)
-			end
-			return button
-		end
-
-		local function clear(frame)
-			for _, child in ipairs(frame:GetChildren()) do
-				if child:IsA("GuiObject") then
-					child:Destroy()
-				end
-			end
-		end
-
-		local function currentRecord(weapon)
-			local records = recordsFor(weapon, false)
-			return records and records[mode] or nil
-		end
-
-		local function changed()
-			UE.Save()
-			if UE.Enabled then
-				pcall(UE.ApplyAll, l)
-			end
-			if onChanged then
-				onChanged()
-			end
-		end
-
-		rebuildWeapons = function()
-			clear(weaponGrid)
-			local order = 0
-			for _, weapon in ipairs(weapons) do
-				if weaponFilter == "" or string.find(string.lower(weapon), weaponFilter, 1, true) ~= nil then
-					order += 1
-					local records = recordsFor(weapon, false)
-					local skin = records and records.skin
-					local shown = weapon
-					if skin and skin.enabled and not skin.random and skin.name ~= nil and skin.name ~= STOCK then
-						shown = skin.name
-					end
-					local off = records ~= nil and records.off == true
-					tile(weaponGrid, order, imageFor(shown), weapon, weapon == UE.Weapon and GREEN or nil, off, function()
-						UE.Weapon = weapon
-						UE.Save()
-						rebuildWeapons()
-						rebuildCosmetics()
-					end, function()
-						-- right click: toggle the skin changer for this weapon
-						local rec = recordsFor(weapon, true)
-						rec.off = not rec.off
-						changed()
-						rebuildWeapons()
-					end)
-				end
-			end
-		end
-
-		rebuildCosmetics = function()
-			clear(cosmeticGrid)
-			local weapon = UE.Weapon
-			if weapon == nil then
-				return
-			end
-			local record = currentRecord(weapon)
-			local entries = { { name = "RANDOM", caption = "Random", random = true } }
-			if mode == "skin" then
-				entries[#entries + 1] = { name = STOCK, caption = weapon }
-			end
-			for _, name in ipairs(pool(mode, weapon)) do
-				entries[#entries + 1] = { name = name, caption = name }
-			end
-			local order = 0
-			for _, entry in ipairs(entries) do
-				if entry.random or cosmeticFilter == "" or string.find(string.lower(entry.caption), cosmeticFilter, 1, true) ~= nil then
-					order += 1
-					local selected = false
-					if record and record.enabled then
-						if entry.random then
-							selected = record.random == true
-						else
-							selected = not record.random and record.name == entry.name
-						end
-					end
-					local image
-					if entry.random then
-						image = "rbxassetid://94238795177693"
-					elseif entry.name == STOCK then
-						image = imageFor(weapon)
-					else
-						image = imageFor(entry.name)
-					end
-					tile(cosmeticGrid, order, image, entry.caption, selected and GREEN or nil, false, function()
-						local rec = recordsFor(weapon, true)[mode]
-						if entry.random then
-							if rec.enabled and rec.random then
-								rec.enabled, rec.random = false, false
-							else
-								rec.enabled, rec.random = true, true
-							end
-						elseif rec.enabled and not rec.random and rec.name == entry.name then
-							rec.enabled = false
-						else
-							rec.enabled, rec.random, rec.name = true, false, entry.name
-						end
-						changed()
-						rebuildWeapons()
-						rebuildCosmetics()
-					end)
-				end
-			end
-		end
-
-		textBox("weapon filter", "grenade launcher...", 32, function(text)
-			weaponFilter = text
-			rebuildWeapons()
-		end)
-		weaponGrid = scroller(76)
-		textBox("cosmetic filter", "red...", 291, function(text)
-			cosmeticFilter = text
-			rebuildCosmetics()
-		end)
-		cosmeticGrid = scroller(335)
-
-		local function wideButton(text, x, y, width, callback)
-			local button = Instance.new("TextButton")
-			button.Position = UDim2.fromOffset(x, y)
-			button.Size = UDim2.fromOffset(width, 24)
-			button.BackgroundColor3 = BOX
-			button.BorderSizePixel = 0
-			button.AutoButtonColor = true
-			button.Font = Enum.Font.Code
-			button.TextSize = 13
-			button.TextColor3 = TEXT
-			button.Text = text
-			button.Parent = main
-			stroke(button)
-			button.MouseButton1Click:Connect(callback)
-			return button
-		end
-
-		-- mode picker: "skin >" like UE's dropdown (a click goes to the next mode)
-		local modeButton = wideButton("", 10, 550, 633, function() end)
-		modeButton.TextXAlignment = Enum.TextXAlignment.Left
-		local arrow = Instance.new("TextLabel")
-		arrow.BackgroundTransparency = 1
-		arrow.Size = UDim2.new(1, -8, 1, 0)
-		arrow.Font = Enum.Font.Code
-		arrow.TextSize = 13
-		arrow.TextColor3 = TEXT
-		arrow.TextXAlignment = Enum.TextXAlignment.Right
-		arrow.Text = ">"
-		arrow.Parent = modeButton
-		local pad = Instance.new("UIPadding")
-		pad.PaddingLeft = UDim.new(0, 8)
-		pad.Parent = modeButton
-		local invertedButton
-		local function paintMode()
-			modeButton.Text = mode
-			invertedButton.Visible = mode == "wrap"
-			local records = recordsFor(UE.Weapon, false)
-			invertedButton.Text = ((records ~= nil and records.wrap.inverted == true) and "[x] " or "[ ] ") .. "inverted"
-		end
-		invertedButton = wideButton("", 10, 524, 140, function()
-			if UE.Weapon == nil then
-				return
-			end
-			local wrap = recordsFor(UE.Weapon, true).wrap
-			wrap.inverted = not wrap.inverted
-			changed()
-			paintMode()
-		end)
-		invertedButton.Visible = false
-		modeButton.MouseButton1Click:Connect(function()
-			local index = table.find(MODES, mode) or 1
-			mode = MODES[index % #MODES + 1]
-			paintMode()
-			rebuildCosmetics()
-		end)
-
-		wideButton("apply selected to all", 10, 578, 633, function()
-			local source = UE.Weapon and recordsFor(UE.Weapon, false)
-			if source == nil then
-				return
-			end
-			for _, weapon in ipairs(weapons) do
-				if weapon ~= UE.Weapon then
-					local target = recordsFor(weapon, true)
-					local from = source[mode]
-					local to = target[mode]
-					to.enabled, to.name, to.random, to.inverted = from.enabled, from.name, from.random, from.inverted
-				end
-			end
-			changed()
-			rebuildWeapons()
-		end)
-		wideButton("reset to defaults", 10, 606, 314, function()
-			UE.Records = {}
-			changed()
-			rebuildWeapons()
-			rebuildCosmetics()
-			paintMode()
-		end)
-		wideButton("close", 329, 606, 314, function()
-			gui.Enabled = false
-			if onClosed then
-				onClosed()
-			end
-		end)
-		label("right click a weapon to toggle the skin changer for it.", 634, 18, 12, Enum.TextXAlignment.Center).TextColor3 =
-			Color3.fromRGB(150, 150, 150)
-
-		paintMode()
-		rebuildWeapons()
-		rebuildCosmetics()
-
-		local panel = { Gui = gui }
-		function panel.SetVisible(on)
-			gui.Enabled = on == true
-			if on then
-				rebuildWeapons()
-				rebuildCosmetics()
-				paintMode()
-			end
-		end
-		function panel.Refresh()
-			rebuildWeapons()
-			rebuildCosmetics()
-			paintMode()
-		end
-		K.onUnload(function()
-			gui:Destroy()
-		end)
-		return panel
-	end
-
-	function UE.BuildUI(l, grid, refresh, runtimeToggle, loadoutToggle)
-		local section = grid:AddSection({ Title = "Cosmetic Changer (UE)", Side = "right" })
-		local panel
-		local showToggle
-		local status = section:AddLabel({ Label = "", TextColor = Color3.fromRGB(255, 190, 90) })
-		local function updateStatus()
-			status:SetLabel(UE.Enabled and "UE Cosmetic Changer is on."
-				or "UE Cosmetic Changer is off. Picks are saved and apply once it is enabled.")
-		end
-
-		local enable = section:AddToggle({
-			Label = "Enable UE Cosmetic Changer",
-			Tooltip = "Applies the picks made in the Cosmetic Changer window (turns on Enable Cosmetic Changes and Use Custom Loadout).",
-			OnChanged = function(on)
-				UE.Enabled = on == true
-				if UE.Enabled then
-					if runtimeToggle ~= nil then
-						runtimeToggle:Set(true)
-					end
-					if loadoutToggle ~= nil then
-						loadoutToggle:Set(true)
-					end
-				end
-				UE.ApplyAll(l)
-				UE.Save()
-				updateStatus()
-				if refresh ~= nil then
-					pcall(refresh)
-				end
-			end,
-		})
-
-		showToggle = section:AddToggle({
-			Label = "Show Cosmetic Changer",
-			Tooltip = "Opens UE's Cosmetic Changer window: weapon filter, cosmetic filter, skin / wrap / charm / finisher.",
-			OnChanged = function(on)
-				if panel == nil then
-					local ok, result = pcall(UE.BuildPanel, l, nil, function()
-						showToggle:Set(false, true)
-					end)
-					if not ok then
-						warn("[Kicia Rebuild] UE Cosmetic Changer window failed: " .. tostring(result))
-						return
-					end
-					panel = result
-				end
-				panel.SetVisible(on)
-			end,
-		})
-
-		section:AddToggle({
-			Label = "Re-roll Random On Respawn",
-			Tooltip = "UE rolls a Random pick again every time the weapon is built; here that happens each respawn.",
-			OnChanged = function(on)
-				UE.RerollOnRespawn = on == true
-				UE.Save()
-			end,
-		}):Set(UE.RerollOnRespawn, true)
-
-		section:AddButton({
-			Label = "Re-roll Randoms Now",
-			OnClick = function()
-				UE.ApplyAll(l, true)
-			end,
-		})
-		section:AddButton({
-			Label = "Reset All Weapons",
-			OnClick = function()
-				UE.Records = {}
-				UE.ApplyAll(l)
-				UE.Save()
-				if panel then
-					panel.Refresh()
-				end
-			end,
-		})
-
-		updateStatus()
-		if UE.Enabled then
-			enable:Set(true)
-		end
-
-		local connection = LocalPlayer.CharacterAdded:Connect(function()
-			if not (UE.Enabled and UE.RerollOnRespawn) then
-				return
-			end
-			task.delay(1, function()
-				if not K.destroyed then
-					UE.ApplyAll(l, true)
-				end
-			end)
-		end)
-		K.onUnload(function()
-			connection:Disconnect()
-		end)
-	end
-
-	load()
-	return UE
-end
-
-do
-	local ok, result = pcall(setupUESkins)
-	if ok then
-		K.UESkins = result
-	else
-		warn("[Kicia Rebuild] UE skin changer failed to set up: " .. tostring(result))
-	end
-end
 
 --  Kicia's error reporter needs a sink; ours prints to the F9 console.
 tbl17.b().use({ Report = function(_, e)
     local detail = type(e) == "table" and (e.Detail or e.Operation) or e
-    warn("[Kicia Rebuild] " .. tostring(detail))
+    KQ("[Kicia Rebuild] " .. tostring(detail))
 end })
 
 local boot = (function()
@@ -95905,7 +95824,7 @@ local boot = (function()
                 if okLoad then
                     r = reporter:ReportResult(res)
                 else
-                    warn("[Kicia Rebuild] auto-load failed: " .. detail)
+                    KQ("[Kicia Rebuild] auto-load failed: " .. detail)
                     r = res
                 end
                 break
@@ -95926,23 +95845,20 @@ local boot = (function()
 
     -- Re-run After Teleport (UE style, from the decompiled UE: protos 255 / 274 and the queue call in proto 1):
     --   * the toggle only writes / deletes the marker file LOAD_PERSISTENT (Silent Load: LOAD_SILENTLY);
-    --   * once per server, while loading, the loader is queued with queue_on_teleport. This build needs NO
-    --     script_key. The queue does not depend on the toggle;
-    --   * the queued loader checks isfile("LOAD_PERSISTENT") itself when it runs in the next server, sets SILENT
-    --     and loads the script (a workspace file, or the address below). That loads this script again, which
-    --     queues the next one.
+    --   * once per server, while loading, the loader is queued with queue_on_teleport - and only when a
+    --     script_key exists (no key, nothing is queued). The queue does not depend on the toggle;
+    --   * the queued loader checks isfile("LOAD_PERSISTENT") itself when it runs in the next server, sets
+    --     script_key / SILENT and runs the Luarmor loader. That loads this script again, which queues the next one.
     do
         local PERSIST_FILE = "LOAD_PERSISTENT"
         local SILENT_FILE = "LOAD_SILENTLY"
-        -- What the queued loader runs: getgenv().KiciaRerunFile (a workspace file) if set, else the address
-        -- getgenv().KiciaRerunUrl, else the public GitHub copy of the script (no key, no token)
-        local RERUN_DEFAULT_URL = "https://raw.githubusercontent.com/kbisnyu-cpu/HEHE/main/kh.lua"
-        -- UE's template shape, with SILENT also put into getgenv() (Real's globals are not always getgenv())
-        local RERUN_HEAD = "\t\tif (not isfile(\"LOAD_PERSISTENT\")) then\n\t\t\treturn;\n\t\tend;\n"
+        -- GITHUB build: the re-run loads this script straight from GitHub, no Luarmor and no script_key;
+        -- getgenv().KiciaRerunUrl replaces the address
+        local RERUN_DEFAULT_LOADER = "https://raw.githubusercontent.com/kbisnyu-cpu/HEHE/main/kh.lua"
+        local RERUN_TEMPLATE = "\t\tif (not isfile(\"LOAD_PERSISTENT\")) then\n\t\t\treturn;\n\t\tend;\n"
             .. "\t\tSILENT = isfile(\"LOAD_SILENTLY\");\n"
             .. "\t\tpcall(function() getgenv().SILENT = SILENT; end);\n"
-        local RERUN_FROM_URL = RERUN_HEAD .. "\t\tloadstring(game:HttpGet(%s))();\n\t\t"
-        local RERUN_FROM_FILE = RERUN_HEAD .. "\t\tloadstring(readfile(%s))();\n\t\t"
+            .. "\t\tloadstring(game:HttpGet(\"%s\"))();\n\t\t"
 
         local queueFn = K.fn("queue_on_teleport") or K.fn("queueonteleport")
         if queueFn == nil then
@@ -95984,34 +95900,31 @@ local boot = (function()
             end
         end
 
-        -- queue once for this server (UE: proto 1, pcall(queue_on_teleport, template)) - no key needed
+        -- the Luarmor key: where the loader that started this script left it
+        local function rerunKey()
+            local key
+            pcall(function() key = getgenv().script_key end)
+            if type(key) ~= "string" or key == "" then pcall(function() key = _G.script_key end) end
+            if type(key) ~= "string" or key == "" then pcall(function() key = script_key end) end
+            if type(key) == "string" and key ~= "" then return key end
+            return nil
+        end
+
+        -- queue once for this server (UE: proto 1, pcall(queue_on_teleport, template:format(script_key)))
         local queued = false
         local function queueLoader()
             if queued then return end
             if type(queueFn) ~= "function" then
-                if rerunEnabled() then warn("[Kicia Rebuild] Re-run After Teleport: executor has no queue_on_teleport") end
+                if rerunEnabled() then KQ("[Kicia Rebuild] Re-run After Teleport: executor has no queue_on_teleport") end
                 return
             end
-            local src
-            local file = getgenv().KiciaRerunFile
-            if type(file) == "string" and file ~= "" then
-                if isf and not isf(file) then
-                    if rerunEnabled() then
-                        warn("[Kicia Rebuild] Re-run After Teleport: file `" .. file .. "` not found in the workspace")
-                    end
-                    return
-                end
-                src = string.format(RERUN_FROM_FILE, string.format("%q", file))
-            else
-                local url = getgenv().KiciaRerunUrl
-                if type(url) ~= "string" or url == "" then url = RERUN_DEFAULT_URL end
-                src = string.format(RERUN_FROM_URL, string.format("%q", url))
-            end
-            if pcall(queueFn, src) then
+            local url = getgenv().KiciaRerunUrl
+            if type(url) ~= "string" or url == "" then url = RERUN_DEFAULT_LOADER end
+            if pcall(queueFn, string.format(RERUN_TEMPLATE, url)) then
                 queued = true
                 K.Log("rerun", "loader queued")
             else
-                warn("[Kicia Rebuild] Re-run After Teleport: queue_on_teleport failed")
+                KQ("[Kicia Rebuild] Re-run After Teleport: queue_on_teleport failed")
             end
         end
         queueLoader()
@@ -96071,6 +95984,7 @@ function K.Unload()
     if getgenv().KiciaRebuild == K then getgenv().KiciaRebuild = nil end
 end
 
+K.Mark("division hud")
 --==========================================================================
 --  Division HUD (DH): the self HUD of The Division, drawn around the crosshair. Ammo / reserve above the
 --  crosshair, health and shield under it with a thin health line, the WASD keys (accent colour while held, white
@@ -96311,7 +96225,7 @@ do -- DH
         --  smoothed screen position of the HUD origin (px); starts at the first target
         local posX, posY
 
-        local function updateFrame(dt)
+        local updateFrame = LPH_NO_VIRTUALIZE(function(dt)
             local s = config.Data and config.Data.DivisionHud
             if type(s) ~= "table" or not s.Enabled then
                 put(root, "Visible", false)
@@ -96454,15 +96368,15 @@ do -- DH
                 put(speedLabel, "Text", string.format("%d u/s", math.floor(speed + 0.5)))
                 put(speedLabel, "TextColor3", accent)
             end
-        end
+        end)
 
-        local conn = K.track(RunService.RenderStepped:Connect(function(dt)
+        local conn = K.track(RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
             local ok, err = pcall(updateFrame, dt)
             if not ok and not K.__dhWarned then
                 K.__dhWarned = true
-                warn("[Kicia DivisionHud] " .. tostring(err))
+                KQ("[Kicia DivisionHud] " .. tostring(err))
             end
-        end))
+        end)))
         K.onUnload(function()
             started = false
             pcall(function() conn:Disconnect() end)
@@ -96474,9 +96388,10 @@ do -- DH
 end
 task.defer(function()
     local ok, err = pcall(K.StartDivisionHud)
-    if not ok then warn("[Kicia DivisionHud] could not start: " .. tostring(err)) end
+    if not ok then KQ("[Kicia DivisionHud] could not start: " .. tostring(err)) end
 end)
 
+K.Mark("team hud")
 --==========================================================================
 --  Team HUD (TMH): the match panel. Title bar (name | main hud | fps | ping), the HP of your team against the
 --  HP of the enemy team and by how much you are winning or losing, then one row per enemy in your match
@@ -96672,7 +96587,7 @@ do -- TMH
             return RED
         end
 
-        local function updateFrame(dt)
+        local updateFrame = LPH_NO_VIRTUALIZE(function(dt)
             if dt and dt > 0 then fps = fps + (1 / dt - fps) * 0.05 end
             local s = config.Data and config.Data.TeamHud
             if type(s) ~= "table" or not s.Enabled or LocalPlayer:GetAttribute("EnvironmentID") == nil then
@@ -96768,15 +96683,15 @@ do -- TMH
             end
             put(root, "Size", UDim2.fromOffset(WIDTH, footerY + (showTarget and FOOTER_H or 4)))
             put(root, "Visible", true)
-        end
+        end)
 
-        local conn = K.track(RunService.RenderStepped:Connect(function(dt)
+        local conn = K.track(RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
             local ok, err = pcall(updateFrame, dt)
             if not ok and not K.__tmhWarned then
                 K.__tmhWarned = true
-                warn("[Kicia TeamHud] " .. tostring(err))
+                KQ("[Kicia TeamHud] " .. tostring(err))
             end
-        end))
+        end)))
         K.onUnload(function()
             started = false
             pcall(function() conn:Disconnect() end)
@@ -96786,9 +96701,10 @@ do -- TMH
 end
 task.defer(function()
     local ok, err = pcall(K.StartTeamHud)
-    if not ok then warn("[Kicia TeamHud] could not start: " .. tostring(err)) end
+    if not ok then KQ("[Kicia TeamHud] could not start: " .. tostring(err)) end
 end)
 
+K.Mark("score hud")
 --==========================================================================
 --  Score HUD (SCH): the match score. Title bar (name | score hud | queue name), our team's score against the
 --  enemy's in the middle with each side's player names, then the round number, the round state and the lead.
@@ -96980,7 +96896,7 @@ do -- SCH
             return list[1] .. "\n+" .. (#list - 1)
         end
 
-        local function updateFrame()
+        local updateFrame = LPH_NO_VIRTUALIZE(function()
             local s = config.Data and config.Data.ScoreHud
             local data = duelData()
             local myTeam = LocalPlayer:GetAttribute("TeamID")
@@ -97055,15 +96971,15 @@ do -- SCH
                 put(leadLine, "Text", paint("tied", YELLOW))
             end
             put(root, "Visible", true)
-        end
+        end)
 
-        local conn = K.track(RunService.RenderStepped:Connect(function()
+        local conn = K.track(RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
             local ok, err = pcall(updateFrame)
             if not ok and not K.__schWarned then
                 K.__schWarned = true
-                warn("[Kicia ScoreHud] " .. tostring(err))
+                KQ("[Kicia ScoreHud] " .. tostring(err))
             end
-        end))
+        end)))
         K.onUnload(function()
             started = false
             pcall(function() conn:Disconnect() end)
@@ -97073,9 +96989,11 @@ do -- SCH
 end
 task.defer(function()
     local ok, err = pcall(K.StartScoreHud)
-    if not ok then warn("[Kicia ScoreHud] could not start: " .. tostring(err)) end
+    if not ok then KQ("[Kicia ScoreHud] could not start: " .. tostring(err)) end
 end)
 
+K.Mark("before main (j1)")
 tbl17.j1()(boot)
 K.loading = false
+pcall(function() K.Log("load", string.format("script loaded in %.2f s (after the boot gate)", os.clock() - K.LoadT0)) end)
 pcall(function() K.Marker:SetAttribute("Loading", false) end)
