@@ -62037,7 +62037,8 @@ return #list
 end
 
 index2._IsHacking = function(arg, arg2, arg3)
-return fn36(arg2) or arg:_IsMovingTooFast(arg2, arg3) or arg:_IsFarOutOfBounds(arg2, arg3)
+-- Only the far-out-of-bounds (desync to ~2^30 studs) check flags a hacker; the camera-rotation and speed checks are off.
+return arg:_IsFarOutOfBounds(arg2, arg3)
 end
 
 index2._IsMovingTooFast = function(arg, arg2, arg3)
