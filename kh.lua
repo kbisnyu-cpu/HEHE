@@ -28301,6 +28301,7 @@ imageLabel.BorderSizePixel = v86[186]
 if image ~= nil and image == K.LithiumLogo then
 imageLabel.ImageColor3 = Color3.new(1, 1, 1)
 imageLabel.ScaleType = Enum.ScaleType.Fit
+do local sq = math.min(rail.Width - 12, rail.HeaderHeight - 5) imageLabel.Size = UDim2.fromOffset(sq, sq) end   -- LY logo: bigger
 pcall(function() K.AddLogoY(imageLabel, function(o) arg3:Bind(o, "ImageColor3", "Accent") end) end)
 else
 arg3:Bind(imageLabel, v86[156], "Accent")
@@ -28932,6 +28933,7 @@ instance.BorderSizePixel = 0
 if image ~= nil and image == K.LithiumLogo then
 instance.ImageColor3 = Color3.new(1, 1, 1)
 instance.ScaleType = Enum.ScaleType.Fit
+instance.Size = UDim2.fromOffset(28, 28)   -- LY logo: bigger
 pcall(function() K.AddLogoY(instance, function(o) arg:Bind(o, "ImageColor3", "Accent") end) end)
 else
 arg:Bind(instance, "ImageColor3", "Accent")
@@ -91685,7 +91687,7 @@ end
         local side = mk("Frame", { Size = UDim2.new(0, LITE_SIDE, 1, 0), BorderSizePixel = 0 }, win)
         self:_paint(side, "BackgroundColor3", "side")
         self._side = side
-        local logo = mk("ImageLabel", { Position = UDim2.fromOffset(12, 5), Size = UDim2.fromOffset(32, 32), BackgroundTransparency = 1, Image = tostring((K.LoadLogo and K.LoadLogo() or K.LithiumLogo) or "") }, side)
+        local logo = mk("ImageLabel", { Position = UDim2.fromOffset(6, 0), Size = UDim2.fromOffset(41, 41), BackgroundTransparency = 1, Image = tostring((K.LoadLogo and K.LoadLogo() or K.LithiumLogo) or "") }, side)
         pcall(function() K.AddLogoY(logo, function(o) self:_paint(o, "ImageColor3", "acc") end) end)
         local title = text(self, side, tostring(self.Title or "LxYHook"), 11, "text", false)
         title.Position = UDim2.fromOffset(52, 0)
