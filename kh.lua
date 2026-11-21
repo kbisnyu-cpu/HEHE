@@ -30638,13 +30638,14 @@ if stateData ~= nil then
 stateData.SilentLoad = silentLoad
 arg2:SaveState()
 end
--- UE style (proto 274): the queued loader reads this marker file (isfile("LOAD_SILENTLY")) to set SILENT
+-- UE style (proto 274): the queued loader reads this marker file to set SILENT. One file per account
+-- (<K.AccountDir>/LOAD_SILENTLY), so Silent Load no longer leaks from one account to the others
 if silentLoad then
 local wrf = K.fn("writefile")
-if wrf then pcall(wrf, "LOAD_SILENTLY", "") end
+if wrf then pcall(wrf, K.AccountDir .. "/LOAD_SILENTLY", "") end
 else
 local dlf = K.fn("delfile")
-if dlf then pcall(dlf, "LOAD_SILENTLY") end
+if dlf then pcall(dlf, K.AccountDir .. "/LOAD_SILENTLY") end
 end
 end,
 })
@@ -95897,13 +95898,15 @@ local boot = (function()
     --   * the queued loader checks isfile("LOAD_PERSISTENT") itself when it runs in the next server, sets
     --     script_key / SILENT and runs the Luarmor loader. That loads this script again, which queues the next one.
     do
-        local PERSIST_FILE = "LOAD_PERSISTENT"
-        local SILENT_FILE = "LOAD_SILENTLY"
+        -- per-account marker files (the old shared LOAD_PERSISTENT / LOAD_SILENTLY made every account follow
+        -- whichever one wrote last); the paths are baked into the queued loader below
+        local PERSIST_FILE = K.AccountDir .. "/LOAD_PERSISTENT"
+        local SILENT_FILE = K.AccountDir .. "/LOAD_SILENTLY"
         -- GITHUB build: the re-run loads this script straight from GitHub, no Luarmor and no script_key;
         -- getgenv().KiciaRerunUrl replaces the address
         local RERUN_DEFAULT_LOADER = "https://raw.githubusercontent.com/kbisnyu-cpu/HEHE/main/kh.lua"
-        local RERUN_TEMPLATE = "\t\tif (not isfile(\"LOAD_PERSISTENT\")) then\n\t\t\treturn;\n\t\tend;\n"
-            .. "\t\tSILENT = isfile(\"LOAD_SILENTLY\");\n"
+        local RERUN_TEMPLATE = "\t\tif (not isfile(\"" .. PERSIST_FILE .. "\")) then\n\t\t\treturn;\n\t\tend;\n"
+            .. "\t\tSILENT = isfile(\"" .. SILENT_FILE .. "\");\n"
             .. "\t\tpcall(function() getgenv().SILENT = SILENT; end);\n"
             .. "\t\tloadstring(game:HttpGet(\"%s\"))();\n\t\t"
 
@@ -95937,6 +95940,17 @@ local boot = (function()
         -- the marker file is the truth: it is still there when the player left with the toggle on, and the config
         -- (which may not have loaded, or was saved before the toggle existed) must not switch the re-run off
         if markerOn() and not rerunEnabled() then setRerunToggle(true) end
+
+        -- Silent Load is saved in this account's general.json; mirror it into this account's marker file
+        local function syncSilentMarker()
+            local silent = stateData ~= nil and stateData.SilentLoad == true
+            if silent then
+                if wrf then pcall(wrf, SILENT_FILE, "") end
+            else
+                if dlf then pcall(dlf, SILENT_FILE) end
+            end
+        end
+        syncSilentMarker()
 
         -- the toggle only writes / deletes the marker (UE: proto 255)
         local function syncMarker(enabled)
